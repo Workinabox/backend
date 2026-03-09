@@ -1,0 +1,32 @@
+[package]
+name = "wiab"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["crates/wiab-core", "crates/wiab-inf", "crates/wiab-app"]
+
+[workspace.dependencies]
+wiab-core = { path = "crates/wiab-core" }
+wiab-inf = { path = "crates/wiab-inf" }
+wiab-app = { path = "crates/wiab-app" }
+rstest = "0.26.1"
+thiserror = "2.0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.39.0", features = ["full"] }
+
+[dependencies]
+wiab-core = { workspace = true }
+wiab-inf = { workspace = true }
+wiab-app = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.dev.package.wiab-core]
+debug = 2
