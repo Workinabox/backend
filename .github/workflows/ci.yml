@@ -81,7 +81,7 @@ jobs:
           key: ${{ runner.os }}-target-test-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace
 
   coverage:
     name: Coverage
