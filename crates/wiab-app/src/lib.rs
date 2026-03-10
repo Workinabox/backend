@@ -1,19 +1,48 @@
-pub struct SomeService {
-    pub name: String,
-    pub version: String,
+use wiab_core::room::{DomainError, Room, RoomId, RoomRepository};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRoomCommand {
+    pub room_id: String,
+    pub capacity: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RoomView {
+    pub room_id: String,
+    pub capacity: usize,
+}
 
-    #[test]
-    fn it_works() {
-        let service = SomeService {
-            name: "SomeService".to_string(),
-            version: "0.1.0".to_string(),
+pub struct RoomApplicationService<R: RoomRepository> {
+    room_repository: R,
+}
+
+impl<R: RoomRepository> RoomApplicationService<R> {
+    pub fn new(room_repository: R) -> Self {
+        Self { room_repository }
+    }
+
+    pub fn create_room(&mut self, command: CreateRoomCommand) -> Result<RoomView, DomainError> {
+        let room_id = RoomId::new(command.room_id)?;
+        let room = Room::new(room_id.clone(), command.capacity)?;
+        let room_view = RoomView {
+            room_id: room_id.as_str().to_owned(),
+            capacity: command.capacity,
         };
-        assert_eq!(service.name, "SomeService");
-        assert_eq!(service.version, "0.1.0");
+        self.room_repository.save(room);
+        Ok(room_view)
+    }
+
+    pub fn list_rooms(&self) -> Vec<RoomView> {
+        let mut rooms = self
+            .room_repository
+            .list()
+            .into_iter()
+            .map(|room| RoomView {
+                room_id: room.id().as_str().to_owned(),
+                capacity: room.capacity(),
+            })
+            .collect::<Vec<_>>();
+        rooms.sort_by(|l, r| l.room_id.cmp(&r.room_id));
+        rooms
     }
 }

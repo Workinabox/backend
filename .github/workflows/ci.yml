@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_HOME: ${{ github.workspace }}/.cargo
   RUST_BACKTRACE: 1
+  CMAKE_POLICY_VERSION_MINIMUM: 3.5
 
 permissions:
   contents: read
@@ -25,6 +26,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            libopus-dev \
+            pkg-config \
+            python3 \
+            python3-pip
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install Python invoke (preflight)
+        run: python3 -m pip install --upgrade --target /tmp/pip-invoke invoke
+
       - name: Install Rust components
         run: rustup component add rustfmt clippy
 
@@ -32,19 +49,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: .cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-lint-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-target-lint-${{ hashFiles('Cargo.lock') }}
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -62,26 +79,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            libopus-dev \
+            pkg-config \
+            python3 \
+            python3-pip
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install Python invoke (preflight)
+        run: python3 -m pip install --upgrade --target /tmp/pip-invoke invoke
+
+      - name: Install rustfmt component
+        run: rustup component add rustfmt
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: .cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: .cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-target-test-${{ hashFiles('Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --workspace
 
   coverage:
     name: Coverage
@@ -103,19 +139,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: .cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-coverage-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-target-coverage-${{ hashFiles('Cargo.lock') }}
 
       - name: Check coverage (wiab-core, 100%)
         run: cargo llvm-cov --package wiab-core --fail-under-lines 100
@@ -130,23 +166,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            libopus-dev \
+            pkg-config \
+            python3 \
+            python3-pip
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install Python invoke (preflight)
+        run: python3 -m pip install --upgrade --target /tmp/pip-invoke invoke
+
+      - name: Install rustfmt component
+        run: rustup component add rustfmt
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: .cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: .cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('Cargo.lock') }}
 
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-target-build-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
         run: cargo build

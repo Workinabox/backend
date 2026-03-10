@@ -1,19 +1,6 @@
-pub struct SomePersistence {
-    pub name: String,
-    pub version: String,
-}
+pub mod repository;
+pub mod sfu;
+pub mod transcription;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let persistence = SomePersistence {
-            name: "SQL Server".to_string(),
-            version: "0.1.0".to_string(),
-        };
-        assert_eq!(persistence.name, "SQL Server");
-        assert_eq!(persistence.version, "0.1.0");
-    }
-}
+pub use repository::InMemoryRoomRepository;
+pub use sfu::{Sfu, handle_signal_socket};
