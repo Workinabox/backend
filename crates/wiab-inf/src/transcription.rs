@@ -216,7 +216,10 @@ impl TrackAudioTranscriber {
         }
 
         let decoded_samples_per_channel =
-            match self.opus_decoder.decode(payload, &mut self.decode_buffer, false) {
+            match self
+                .opus_decoder
+                .decode(payload, &mut self.decode_buffer, false)
+            {
                 Ok(samples) => samples,
                 Err(err) => {
                     warn!(

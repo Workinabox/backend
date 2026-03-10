@@ -100,7 +100,10 @@ mod tests {
 
     #[test]
     fn domain_error_display_empty_room_id() {
-        assert_eq!(DomainError::EmptyRoomId.to_string(), "room id cannot be empty");
+        assert_eq!(
+            DomainError::EmptyRoomId.to_string(),
+            "room id cannot be empty"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::IpAddr,
-    num::{NonZeroU32, NonZeroU8},
+    num::{NonZeroU8, NonZeroU32},
     sync::{Arc, Mutex as StdMutex},
 };
 
@@ -401,7 +401,11 @@ impl Sfu {
             peer_id: peer.id.clone(),
             track_id: producer_id.to_owned(),
         };
-        let track_transcriber = match TrackAudioTranscriber::new(transcriber, identity, opus_channels) {
+        let track_transcriber = match TrackAudioTranscriber::new(
+            transcriber,
+            identity,
+            opus_channels,
+        ) {
             Ok(track_transcriber) => track_transcriber,
             Err(err) => {
                 warn!(
