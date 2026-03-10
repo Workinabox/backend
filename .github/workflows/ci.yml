@@ -34,7 +34,9 @@ jobs:
             python3 python3-pip ninja-build
 
       - name: Install Rust components
-        run: rustup component add rustfmt clippy
+        run: |
+          rustup component add rustfmt clippy
+          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
