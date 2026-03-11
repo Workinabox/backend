@@ -2,6 +2,16 @@
 
 The main process of workinabox. Contains everything to run agent farms and interact with them.
 
+## Overview
+
+The backend is a Rust service built on Tokio and Axum. It currently provides:
+
+- an HTTP health endpoint
+- room discovery
+- a WebSocket signaling endpoint
+- a mediasoup-based SFU for real-time audio
+- optional local speech-to-text using Whisper
+
 ## Environment variables
 
 ### Speech-to-text (optional)
