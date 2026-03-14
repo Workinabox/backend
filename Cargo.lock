@@ -2461,6 +2461,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiab-app",
+ "wiab-core",
  "wiab-inf",
 ]
 
@@ -2468,7 +2469,12 @@ dependencies = [
 name = "wiab-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64",
  "serde",
+ "tokio",
+ "tracing",
+ "uuid",
  "wiab-core",
 ]
 
@@ -2476,7 +2482,9 @@ dependencies = [
 name = "wiab-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -2494,6 +2502,7 @@ dependencies = [
  "tracing",
  "uuid",
  "whisper-rs",
+ "wiab-app",
  "wiab-core",
 ]
 

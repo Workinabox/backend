@@ -20,9 +20,16 @@ use tokio::sync::{RwLock, mpsc};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use wiab_core::transcript::TranscriptIdentity;
+use wiab_app::{MeetingApplicationService, MeetingClientEvent};
+use wiab_core::{
+    meeting::{MeetingSnapshot, MinutesDocument},
+    transcript::{FinalizedTranscript, TranscriptIdentity},
+};
 
-use crate::transcription::{LocalTranscriber, TrackAudioTranscriber};
+use crate::{
+    in_memory_meeting_repository::InMemoryMeetingRepository,
+    transcription::{LocalTranscriber, TrackAudioTranscriber},
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,8 +56,12 @@ struct ServerEnvelope {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientSignal {
-    Join {
-        room_id: String,
+    JoinMeeting {
+        meeting_id: String,
+        participant_id: String,
+    },
+    EndMeeting {
+        meeting_id: String,
     },
     CreateWebrtcTransport {
         direction: TransportDirection,
@@ -78,11 +89,39 @@ enum ClientSignal {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerSignal {
-    Joined {
+    MeetingJoined {
         peer_id: String,
-        room_id: String,
+        participant_id: String,
+        meeting: MeetingSnapshot,
         router_rtp_capabilities: RtpCapabilitiesFinalized,
         existing_producer_ids: Vec<String>,
+    },
+    MeetingSnapshot {
+        meeting: MeetingSnapshot,
+    },
+    AgentText {
+        meeting_id: String,
+        participant_id: String,
+        participant_name: String,
+        utterance_id: String,
+        text: String,
+    },
+    AgentAudio {
+        meeting_id: String,
+        participant_id: String,
+        participant_name: String,
+        utterance_id: String,
+        mime_type: String,
+        audio_base64: String,
+    },
+    MeetingEnded {
+        meeting_id: String,
+        ended_by_participant_id: String,
+        ended_at: String,
+    },
+    MinutesReady {
+        meeting_id: String,
+        minutes: MinutesDocument,
     },
     WebrtcTransportCreated {
         direction: TransportDirection,
@@ -128,7 +167,8 @@ struct PeerTransport {
 
 struct PeerState {
     id: String,
-    room_id: String,
+    meeting_id: String,
+    participant_id: String,
     signal_tx: mpsc::UnboundedSender<ServerEnvelope>,
     transports: RwLock<HashMap<String, PeerTransport>>,
     producers: RwLock<HashMap<String, Producer>>,
@@ -137,7 +177,7 @@ struct PeerState {
 }
 
 #[derive(Default)]
-struct RoomState {
+struct MeetingMediaState {
     peers: HashMap<String, Arc<PeerState>>,
     producer_owners: HashMap<String, String>,
 }
@@ -147,16 +187,20 @@ pub struct Sfu {
     _worker: Worker,
     router: Router,
     direct_transport: DirectTransport,
-    rooms: RwLock<HashMap<String, RoomState>>,
+    meetings: RwLock<HashMap<String, MeetingMediaState>>,
     listen_ip: IpAddr,
     announced_address: Option<String>,
     transcriber: Option<Arc<LocalTranscriber>>,
+    meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
 }
 
 const PRODUCER_STATS_LOG_INTERVAL_SECONDS: u64 = 5;
 
 impl Sfu {
-    pub async fn new() -> anyhow::Result<Self> {
+    pub async fn new(
+        meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
+        transcript_tx: mpsc::UnboundedSender<FinalizedTranscript>,
+    ) -> anyhow::Result<Self> {
         let worker_manager = WorkerManager::new();
         let worker = worker_manager
             .create_worker(WorkerSettings::default())
@@ -170,7 +214,7 @@ impl Sfu {
             .create_direct_transport(DirectTransportOptions::default())
             .await
             .context("failed to create mediasoup direct transport")?;
-        let transcriber = LocalTranscriber::from_env()
+        let transcriber = LocalTranscriber::from_env(transcript_tx)
             .context("failed to initialize local whisper transcriber")?;
 
         let listen_ip = std::env::var("WIAB_MEDIASOUP_LISTEN_IP")
@@ -192,22 +236,25 @@ impl Sfu {
             _worker: worker,
             router,
             direct_transport,
-            rooms: RwLock::new(HashMap::new()),
+            meetings: RwLock::new(HashMap::new()),
             listen_ip,
             announced_address,
             transcriber,
+            meeting_service,
         })
     }
 
     async fn create_peer(
         &self,
-        room_id: String,
+        meeting_id: String,
+        participant_id: String,
         signal_tx: mpsc::UnboundedSender<ServerEnvelope>,
     ) -> anyhow::Result<(Arc<PeerState>, Vec<String>)> {
         let peer_id = Uuid::new_v4().to_string();
         let peer = Arc::new(PeerState {
             id: peer_id.clone(),
-            room_id: room_id.clone(),
+            meeting_id: meeting_id.clone(),
+            participant_id,
             signal_tx,
             transports: RwLock::new(HashMap::new()),
             producers: RwLock::new(HashMap::new()),
@@ -216,10 +263,14 @@ impl Sfu {
         });
 
         let existing_producer_ids = {
-            let mut rooms = self.rooms.write().await;
-            let room = rooms.entry(room_id).or_default();
-            let existing = room.producer_owners.keys().cloned().collect::<Vec<_>>();
-            room.peers.insert(peer_id, peer.clone());
+            let mut meetings = self.meetings.write().await;
+            let meeting_media = meetings.entry(meeting_id).or_default();
+            let existing = meeting_media
+                .producer_owners
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            meeting_media.peers.insert(peer_id, peer.clone());
             existing
         };
 
@@ -314,7 +365,7 @@ impl Sfu {
             .context("failed to create mediasoup producer")?;
         let producer_id = producer.id().to_string();
         self.spawn_producer_stats_logger(
-            peer.room_id.clone(),
+            peer.meeting_id.clone(),
             peer.id.clone(),
             producer_id.clone(),
             producer.downgrade(),
@@ -328,14 +379,16 @@ impl Sfu {
             .await;
 
         let peers_to_notify = {
-            let mut rooms = self.rooms.write().await;
-            let room = rooms
-                .get_mut(&peer.room_id)
-                .ok_or_else(|| anyhow!("room '{}' not found", peer.room_id))?;
-            room.producer_owners
+            let mut meetings = self.meetings.write().await;
+            let meeting_media = meetings
+                .get_mut(&peer.meeting_id)
+                .ok_or_else(|| anyhow!("meeting '{}' not found", peer.meeting_id))?;
+            meeting_media
+                .producer_owners
                 .insert(producer_id.clone(), peer.id.clone());
 
-            room.peers
+            meeting_media
+                .peers
                 .iter()
                 .filter_map(|(peer_id, other_peer)| {
                     if *peer_id == peer.id {
@@ -366,8 +419,8 @@ impl Sfu {
 
         let Some(opus_channels) = opus_channel_count(producer.rtp_parameters()) else {
             warn!(
-                "skipping transcription room='{}' peer='{}' producer='{}' reason='opus codec not found'",
-                peer.room_id, peer.id, producer_id
+                "skipping transcription meeting='{}' peer='{}' producer='{}' reason='opus codec not found'",
+                peer.meeting_id, peer.id, producer_id
             );
             return;
         };
@@ -375,8 +428,8 @@ impl Sfu {
         let rtp_capabilities = rtp_capabilities_from_producer(&producer);
         if !self.router.can_consume(&producer.id(), &rtp_capabilities) {
             warn!(
-                "skipping transcription room='{}' peer='{}' producer='{}' reason='router cannot consume producer'",
-                peer.room_id, peer.id, producer_id
+                "skipping transcription meeting='{}' peer='{}' producer='{}' reason='router cannot consume producer'",
+                peer.meeting_id, peer.id, producer_id
             );
             return;
         }
@@ -389,15 +442,15 @@ impl Sfu {
             Ok(consumer) => consumer,
             Err(err) => {
                 warn!(
-                    "failed to create transcription consumer room='{}' peer='{}' producer='{}': {}",
-                    peer.room_id, peer.id, producer_id, err
+                    "failed to create transcription consumer meeting='{}' peer='{}' producer='{}': {}",
+                    peer.meeting_id, peer.id, producer_id, err
                 );
                 return;
             }
         };
 
         let identity = TranscriptIdentity {
-            room_id: peer.room_id.clone(),
+            meeting_id: peer.meeting_id.clone(),
             peer_id: peer.id.clone(),
             track_id: producer_id.to_owned(),
         };
@@ -409,8 +462,8 @@ impl Sfu {
             Ok(track_transcriber) => track_transcriber,
             Err(err) => {
                 warn!(
-                    "failed to initialize transcription decoder room='{}' peer='{}' producer='{}': {}",
-                    peer.room_id, peer.id, producer_id, err
+                    "failed to initialize transcription decoder meeting='{}' peer='{}' producer='{}': {}",
+                    peer.meeting_id, peer.id, producer_id, err
                 );
                 return;
             }
@@ -428,7 +481,7 @@ impl Sfu {
         on_rtp_handler.detach();
 
         let track_transcriber_for_close = Arc::clone(&track_transcriber);
-        let room_id_for_close = peer.room_id.clone();
+        let meeting_id_for_close = peer.meeting_id.clone();
         let peer_id_for_close = peer.id.clone();
         let producer_id_for_close = producer_id.to_owned();
         let on_close_handler = direct_consumer.on_close(move || {
@@ -438,8 +491,8 @@ impl Sfu {
             };
             transcriber.finish();
             info!(
-                "stopped transcription consumer room='{}' peer='{}' producer='{}'",
-                room_id_for_close, peer_id_for_close, producer_id_for_close
+                "stopped transcription consumer meeting='{}' peer='{}' producer='{}'",
+                meeting_id_for_close, peer_id_for_close, producer_id_for_close
             );
         });
         on_close_handler.detach();
@@ -449,14 +502,14 @@ impl Sfu {
             .await
             .insert(producer_id.to_owned(), direct_consumer);
         info!(
-            "started transcription consumer room='{}' peer='{}' producer='{}' channels={}",
-            peer.room_id, peer.id, producer_id, opus_channels
+            "started transcription consumer meeting='{}' peer='{}' producer='{}' channels={}",
+            peer.meeting_id, peer.id, producer_id, opus_channels
         );
     }
 
     fn spawn_producer_stats_logger(
         &self,
-        room_id: String,
+        meeting_id: String,
         peer_id: String,
         producer_id: String,
         weak_producer: WeakProducer,
@@ -470,8 +523,8 @@ impl Sfu {
             let mut previous_byte_count: Option<u64> = None;
 
             info!(
-                "started producer stats logger room='{}' peer='{}' producer='{}'",
-                room_id, peer_id, producer_id
+                "started producer stats logger meeting='{}' peer='{}' producer='{}'",
+                meeting_id, peer_id, producer_id
             );
 
             loop {
@@ -479,16 +532,16 @@ impl Sfu {
 
                 let Some(producer) = weak_producer.upgrade() else {
                     info!(
-                        "stopped producer stats logger room='{}' peer='{}' producer='{}' (producer dropped)",
-                        room_id, peer_id, producer_id
+                        "stopped producer stats logger meeting='{}' peer='{}' producer='{}' (producer dropped)",
+                        meeting_id, peer_id, producer_id
                     );
                     break;
                 };
 
                 if producer.closed() {
                     info!(
-                        "stopped producer stats logger room='{}' peer='{}' producer='{}' (producer closed)",
-                        room_id, peer_id, producer_id
+                        "stopped producer stats logger meeting='{}' peer='{}' producer='{}' (producer closed)",
+                        meeting_id, peer_id, producer_id
                     );
                     break;
                 }
@@ -497,8 +550,8 @@ impl Sfu {
                     Ok(stats) => stats,
                     Err(err) => {
                         warn!(
-                            "failed to query producer stats room='{}' peer='{}' producer='{}': {}",
-                            room_id, peer_id, producer_id, err
+                            "failed to query producer stats meeting='{}' peer='{}' producer='{}': {}",
+                            meeting_id, peer_id, producer_id, err
                         );
                         continue;
                     }
@@ -506,8 +559,8 @@ impl Sfu {
 
                 if stats.is_empty() {
                     info!(
-                        "producer stats room='{}' peer='{}' producer='{}' streams=0",
-                        room_id, peer_id, producer_id
+                        "producer stats meeting='{}' peer='{}' producer='{}' streams=0",
+                        meeting_id, peer_id, producer_id
                     );
                     continue;
                 }
@@ -529,8 +582,8 @@ impl Sfu {
                 previous_byte_count = Some(byte_count);
 
                 info!(
-                    "producer stats room='{}' peer='{}' producer='{}' streams={} packets={} (+{}) bytes={} (+{}) bitrate_bps={} packets_lost={}",
-                    room_id,
+                    "producer stats meeting='{}' peer='{}' producer='{}' streams={} packets={} (+{}) bytes={} (+{}) bitrate_bps={} packets_lost={}",
+                    meeting_id,
                     peer_id,
                     producer_id,
                     stream_count,
@@ -611,20 +664,20 @@ impl Sfu {
         Ok(())
     }
 
-    async fn room_has_producer(&self, room_id: &str, producer_id: &str) -> bool {
-        let rooms = self.rooms.read().await;
-        rooms
-            .get(room_id)
-            .is_some_and(|room| room.producer_owners.contains_key(producer_id))
+    async fn meeting_has_producer(&self, meeting_id: &str, producer_id: &str) -> bool {
+        let meetings = self.meetings.read().await;
+        meetings
+            .get(meeting_id)
+            .is_some_and(|meeting_media| meeting_media.producer_owners.contains_key(producer_id))
     }
 
-    async fn remove_peer(&self, room_id: &str, peer_id: &str) {
+    async fn remove_peer(&self, meeting_id: &str, peer_id: &str) {
         let removed_peer = {
-            let mut rooms = self.rooms.write().await;
-            let Some(room) = rooms.get_mut(room_id) else {
+            let mut meetings = self.meetings.write().await;
+            let Some(meeting_media) = meetings.get_mut(meeting_id) else {
                 return;
             };
-            room.peers.remove(peer_id)
+            meeting_media.peers.remove(peer_id)
         };
         let Some(removed_peer) = removed_peer else {
             return;
@@ -638,23 +691,23 @@ impl Sfu {
             .cloned()
             .collect::<Vec<_>>();
 
-        let (remaining_peers, room_empty) = {
-            let mut rooms = self.rooms.write().await;
-            let Some(room) = rooms.get_mut(room_id) else {
+        let (remaining_peers, meeting_empty) = {
+            let mut meetings = self.meetings.write().await;
+            let Some(meeting_media) = meetings.get_mut(meeting_id) else {
                 return;
             };
 
             for producer_id in &removed_producer_ids {
-                room.producer_owners.remove(producer_id);
+                meeting_media.producer_owners.remove(producer_id);
             }
 
-            let peers = room.peers.values().cloned().collect::<Vec<_>>();
-            let room_empty = room.peers.is_empty();
-            if room_empty {
-                rooms.remove(room_id);
+            let peers = meeting_media.peers.values().cloned().collect::<Vec<_>>();
+            let meeting_empty = meeting_media.peers.is_empty();
+            if meeting_empty {
+                meetings.remove(meeting_id);
             }
 
-            (peers, room_empty)
+            (peers, meeting_empty)
         };
 
         for peer in remaining_peers {
@@ -666,10 +719,134 @@ impl Sfu {
             });
         }
 
-        info!("peer '{}' left room '{}'", peer_id, room_id);
-        if room_empty {
-            info!("room '{}' is empty and was removed", room_id);
+        info!("peer '{}' left meeting '{}'", peer_id, meeting_id);
+        if meeting_empty {
+            info!("meeting '{}' is empty and was removed", meeting_id);
         }
+    }
+
+    async fn find_peer(&self, meeting_id: &str, peer_id: &str) -> Option<Arc<PeerState>> {
+        self.meetings
+            .read()
+            .await
+            .get(meeting_id)
+            .and_then(|meeting_media| meeting_media.peers.get(peer_id))
+            .cloned()
+    }
+
+    pub async fn handle_finalized_transcript(&self, transcript: FinalizedTranscript) {
+        let Some(peer) = self
+            .find_peer(
+                &transcript.identity.meeting_id,
+                &transcript.identity.peer_id,
+            )
+            .await
+        else {
+            return;
+        };
+
+        let events = match self
+            .meeting_service
+            .record_human_utterance(&peer.meeting_id, &peer.participant_id, &transcript.text)
+            .await
+        {
+            Ok(events) => events,
+            Err(err) => {
+                warn!(
+                    "failed to process transcript meeting='{}' participant='{}' chunk={} err={err}",
+                    peer.meeting_id, peer.participant_id, transcript.chunk_index
+                );
+                return;
+            }
+        };
+
+        self.broadcast_meeting_client_events(&peer.meeting_id, &events)
+            .await;
+    }
+
+    async fn broadcast_meeting_client_events(
+        &self,
+        meeting_id: &str,
+        events: &[MeetingClientEvent],
+    ) {
+        for event in events {
+            let signal = server_signal_from_client_event(event.clone());
+            self.broadcast_signal(meeting_id, signal, None).await;
+        }
+    }
+
+    async fn broadcast_signal(
+        &self,
+        meeting_id: &str,
+        signal: ServerSignal,
+        skip_peer_id: Option<&str>,
+    ) {
+        let peers = self
+            .meetings
+            .read()
+            .await
+            .get(meeting_id)
+            .map(|meeting_media| meeting_media.peers.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        for peer in peers {
+            if skip_peer_id.is_some_and(|peer_id| peer_id == peer.id) {
+                continue;
+            }
+
+            let _ = peer.signal_tx.send(ServerEnvelope {
+                request_id: None,
+                signal: signal.clone(),
+            });
+        }
+    }
+}
+
+fn server_signal_from_client_event(event: MeetingClientEvent) -> ServerSignal {
+    match event {
+        MeetingClientEvent::AgentText {
+            meeting_id,
+            participant_id,
+            participant_name,
+            utterance_id,
+            text,
+        } => ServerSignal::AgentText {
+            meeting_id,
+            participant_id,
+            participant_name,
+            utterance_id,
+            text,
+        },
+        MeetingClientEvent::AgentAudio {
+            meeting_id,
+            participant_id,
+            participant_name,
+            utterance_id,
+            clip,
+        } => ServerSignal::AgentAudio {
+            meeting_id,
+            participant_id,
+            participant_name,
+            utterance_id,
+            mime_type: clip.mime_type,
+            audio_base64: clip.audio_base64,
+        },
+        MeetingClientEvent::MeetingEnded {
+            meeting_id,
+            ended_by_participant_id,
+            ended_at,
+        } => ServerSignal::MeetingEnded {
+            meeting_id,
+            ended_by_participant_id,
+            ended_at,
+        },
+        MeetingClientEvent::MinutesReady {
+            meeting_id,
+            minutes,
+        } => ServerSignal::MinutesReady {
+            meeting_id,
+            minutes,
+        },
     }
 }
 
@@ -720,34 +897,114 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                 };
 
                 match envelope.signal {
-                    ClientSignal::Join { room_id } => {
+                    ClientSignal::JoinMeeting {
+                        meeting_id,
+                        participant_id,
+                    } => {
                         if current_peer.is_some() {
-                            send_error("peer is already joined to a room".to_owned(), &outbound_tx);
+                            send_error(
+                                "peer is already joined to a meeting".to_owned(),
+                                &outbound_tx,
+                            );
                             continue;
                         }
 
-                        match sfu.create_peer(room_id.clone(), outbound_tx.clone()).await {
+                        let meeting = match sfu
+                            .meeting_service
+                            .validate_join(&meeting_id, &participant_id)
+                        {
+                            Ok(meeting) => meeting,
+                            Err(err) => {
+                                send_error(format!("failed to join meeting: {err}"), &outbound_tx);
+                                continue;
+                            }
+                        };
+
+                        match sfu
+                            .create_peer(
+                                meeting_id.clone(),
+                                participant_id.clone(),
+                                outbound_tx.clone(),
+                            )
+                            .await
+                        {
                             Ok((peer, existing_producer_ids)) => {
                                 current_peer = Some(peer.clone());
                                 let _ = outbound_tx.send(ServerEnvelope {
                                     request_id,
-                                    signal: ServerSignal::Joined {
+                                    signal: ServerSignal::MeetingJoined {
                                         peer_id: peer.id.clone(),
-                                        room_id: room_id.clone(),
+                                        participant_id: participant_id.clone(),
+                                        meeting: meeting.clone(),
                                         router_rtp_capabilities: sfu.router.rtp_capabilities(),
                                         existing_producer_ids,
                                     },
                                 });
+                                let _ = outbound_tx.send(ServerEnvelope {
+                                    request_id: None,
+                                    signal: ServerSignal::MeetingSnapshot { meeting },
+                                });
                             }
                             Err(err) => {
-                                send_error(format!("failed to join room: {err}"), &outbound_tx);
+                                send_error(format!("failed to join meeting: {err}"), &outbound_tx);
+                            }
+                        }
+                    }
+                    ClientSignal::EndMeeting { meeting_id } => {
+                        let Some(peer) = current_peer.clone() else {
+                            send_error("join a meeting before ending it".to_owned(), &outbound_tx);
+                            continue;
+                        };
+                        if peer.meeting_id != meeting_id {
+                            send_error(
+                                "peer is not joined to the requested meeting".to_owned(),
+                                &outbound_tx,
+                            );
+                            continue;
+                        }
+
+                        match sfu
+                            .meeting_service
+                            .end_meeting(&peer.meeting_id, &peer.participant_id)
+                            .await
+                        {
+                            Ok(events) => {
+                                for event in events {
+                                    match event.clone() {
+                                        MeetingClientEvent::MeetingEnded { .. } => {
+                                            let _ = outbound_tx.send(ServerEnvelope {
+                                                request_id,
+                                                signal: server_signal_from_client_event(
+                                                    event.clone(),
+                                                ),
+                                            });
+                                            sfu.broadcast_signal(
+                                                &peer.meeting_id,
+                                                server_signal_from_client_event(event),
+                                                Some(&peer.id),
+                                            )
+                                            .await;
+                                        }
+                                        _ => {
+                                            sfu.broadcast_signal(
+                                                &peer.meeting_id,
+                                                server_signal_from_client_event(event),
+                                                None,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                send_error(format!("failed to end meeting: {err}"), &outbound_tx);
                             }
                         }
                     }
                     ClientSignal::CreateWebrtcTransport { direction } => {
                         let Some(peer) = current_peer.clone() else {
                             send_error(
-                                "join a room before creating transports".to_owned(),
+                                "join a meeting before creating transports".to_owned(),
                                 &outbound_tx,
                             );
                             continue;
@@ -781,7 +1038,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                     } => {
                         let Some(peer) = current_peer.clone() else {
                             send_error(
-                                "join a room before connecting transports".to_owned(),
+                                "join a meeting before connecting transports".to_owned(),
                                 &outbound_tx,
                             );
                             continue;
@@ -811,7 +1068,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                         rtp_parameters,
                     } => {
                         let Some(peer) = current_peer.clone() else {
-                            send_error("join a room before producing".to_owned(), &outbound_tx);
+                            send_error("join a meeting before producing".to_owned(), &outbound_tx);
                             continue;
                         };
 
@@ -847,13 +1104,16 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                         rtp_capabilities,
                     } => {
                         let Some(peer) = current_peer.clone() else {
-                            send_error("join a room before consuming".to_owned(), &outbound_tx);
+                            send_error("join a meeting before consuming".to_owned(), &outbound_tx);
                             continue;
                         };
 
-                        if !sfu.room_has_producer(&peer.room_id, &producer_id).await {
+                        if !sfu
+                            .meeting_has_producer(&peer.meeting_id, &producer_id)
+                            .await
+                        {
                             send_error(
-                                format!("producer '{}' does not exist in room", producer_id),
+                                format!("producer '{}' does not exist in meeting", producer_id),
                                 &outbound_tx,
                             );
                             continue;
@@ -882,7 +1142,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                     ClientSignal::ResumeConsumer { consumer_id } => {
                         let Some(peer) = current_peer.clone() else {
                             send_error(
-                                "join a room before resuming consumers".to_owned(),
+                                "join a meeting before resuming consumers".to_owned(),
                                 &outbound_tx,
                             );
                             continue;
@@ -917,9 +1177,9 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
     }
 
     if let Some(peer) = current_peer {
-        sfu.remove_peer(&peer.room_id, &peer.id).await;
+        sfu.remove_peer(&peer.meeting_id, &peer.id).await;
     } else {
-        warn!("signal socket closed before peer joined a room");
+        warn!("signal socket closed before peer joined a meeting");
     }
 }
 

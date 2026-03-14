@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::Context;
 use opus::{Channels as OpusChannels, Decoder as OpusDecoder};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use wiab_core::{
@@ -17,7 +18,7 @@ use wiab_core::{
         MIN_VOICED_MS, OPUS_SAMPLE_RATE_HZ, TRANSCRIPT_SAMPLE_RATE_HZ, downsample_48k_to_16k,
         extract_rtp_payload, is_voiced, to_mono_f32,
     },
-    transcript::{TranscriptIdentity, TranscriptJob},
+    transcript::{FinalizedTranscript, TranscriptIdentity, TranscriptJob},
 };
 
 #[derive(Clone)]
@@ -26,7 +27,9 @@ pub struct LocalTranscriber {
 }
 
 impl LocalTranscriber {
-    pub fn from_env() -> anyhow::Result<Option<Arc<Self>>> {
+    pub fn from_env(
+        transcript_tx: UnboundedSender<FinalizedTranscript>,
+    ) -> anyhow::Result<Option<Arc<Self>>> {
         let Some(model_path) = std::env::var("WIAB_WHISPER_MODEL_PATH").ok() else {
             info!("transcription disabled: set WIAB_WHISPER_MODEL_PATH to enable local STT");
             return Ok(None);
@@ -50,7 +53,9 @@ impl LocalTranscriber {
         let (tx, rx) = mpsc::channel::<TranscriptJob>();
         thread::Builder::new()
             .name("wiab-stt".to_owned())
-            .spawn(move || run_transcription_worker(model_path, language, threads, rx))
+            .spawn(move || {
+                run_transcription_worker(model_path, language, threads, rx, transcript_tx)
+            })
             .context("failed to spawn transcription worker thread")?;
 
         info!("transcription enabled with local whisper model");
@@ -69,6 +74,7 @@ fn run_transcription_worker(
     language: Option<String>,
     threads: i32,
     rx: Receiver<TranscriptJob>,
+    transcript_tx: UnboundedSender<FinalizedTranscript>,
 ) {
     let context_parameters = WhisperContextParameters::default();
     let context = match WhisperContext::new_with_params(&model_path, context_parameters) {
@@ -109,8 +115,11 @@ fn run_transcription_worker(
 
         if let Err(err) = state.full(params, &job.pcm_16k_mono) {
             warn!(
-                "transcription failed room='{}' peer='{}' track='{}' chunk={} err={err}",
-                job.identity.room_id, job.identity.peer_id, job.identity.track_id, job.chunk_index
+                "transcription failed meeting='{}' peer='{}' track='{}' chunk={} err={err}",
+                job.identity.meeting_id,
+                job.identity.peer_id,
+                job.identity.track_id,
+                job.chunk_index
             );
             continue;
         }
@@ -119,8 +128,8 @@ fn run_transcription_worker(
             Ok(segment_count) => segment_count,
             Err(err) => {
                 warn!(
-                    "transcription failed to read segment count room='{}' peer='{}' track='{}' chunk={} err={err}",
-                    job.identity.room_id,
+                    "transcription failed to read segment count meeting='{}' peer='{}' track='{}' chunk={} err={err}",
+                    job.identity.meeting_id,
                     job.identity.peer_id,
                     job.identity.track_id,
                     job.chunk_index
@@ -138,8 +147,8 @@ fn run_transcription_worker(
                 }
                 Err(err) => {
                     warn!(
-                        "transcription failed to read segment room='{}' peer='{}' track='{}' chunk={} segment={} err={err}",
-                        job.identity.room_id,
+                        "transcription failed to read segment meeting='{}' peer='{}' track='{}' chunk={} segment={} err={err}",
+                        job.identity.meeting_id,
                         job.identity.peer_id,
                         job.identity.track_id,
                         job.chunk_index,
@@ -155,13 +164,21 @@ fn run_transcription_worker(
         }
 
         info!(
-            "transcript room='{}' peer='{}' track='{}' chunk={} text={}",
-            job.identity.room_id,
+            "transcript meeting='{}' peer='{}' track='{}' chunk={} text={}",
+            job.identity.meeting_id,
             job.identity.peer_id,
             job.identity.track_id,
             job.chunk_index,
             transcript
         );
+
+        if let Err(err) = transcript_tx.send(FinalizedTranscript {
+            identity: job.identity,
+            chunk_index: job.chunk_index,
+            text: transcript.to_owned(),
+        }) {
+            warn!("failed to publish finalized transcript to runtime: {err}");
+        }
     }
 }
 
@@ -223,8 +240,8 @@ impl TrackAudioTranscriber {
                 Ok(samples) => samples,
                 Err(err) => {
                     warn!(
-                        "opus decode failed room='{}' peer='{}' track='{}': {err}",
-                        self.identity.room_id, self.identity.peer_id, self.identity.track_id
+                        "opus decode failed meeting='{}' peer='{}' track='{}': {err}",
+                        self.identity.meeting_id, self.identity.peer_id, self.identity.track_id
                     );
                     return;
                 }
