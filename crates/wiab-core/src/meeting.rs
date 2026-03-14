@@ -698,6 +698,281 @@ mod tests {
         );
     }
 
+    #[test]
+    fn meeting_rejects_empty_title() {
+        let owner = human_participant("owner-1", MeetingRole::Owner, "Frederic");
+        let moderator = agent_participant("agent-1", MeetingRole::Moderator, "Moderator");
+
+        let error = Meeting::new(
+            "   ".to_owned(),
+            owner.participant_id.clone(),
+            moderator.participant_id.clone(),
+            vec![owner, moderator],
+            vec![agenda_item("agenda-1", "review launch")],
+            "2026-03-14T08:00:00Z".to_owned(),
+        )
+        .expect_err("blank title should be rejected");
+
+        assert_eq!(error, MeetingError::EmptyTitle);
+    }
+
+    #[test]
+    fn meeting_rejects_invalid_owner_and_moderator_bindings() {
+        let owner = human_participant("owner-1", MeetingRole::Participant, "Frederic");
+        let moderator = human_participant("mod-1", MeetingRole::Moderator, "Moderator");
+
+        let error = Meeting::new(
+            "Leadership".to_owned(),
+            owner.participant_id.clone(),
+            moderator.participant_id.clone(),
+            vec![owner.clone(), moderator.clone()],
+            vec![agenda_item("agenda-1", "review launch")],
+            "2026-03-14T08:00:00Z".to_owned(),
+        )
+        .expect_err("invalid owner role should be rejected first");
+        assert_eq!(error, MeetingError::OwnerRoleMismatch(owner.participant_id));
+
+        let owner = human_participant("owner-2", MeetingRole::Owner, "Frederic");
+        let moderator = human_participant("mod-2", MeetingRole::Moderator, "Moderator");
+        let error = Meeting::new(
+            "Leadership".to_owned(),
+            owner.participant_id.clone(),
+            moderator.participant_id.clone(),
+            vec![owner, moderator.clone()],
+            vec![agenda_item("agenda-1", "review launch")],
+            "2026-03-14T08:00:00Z".to_owned(),
+        )
+        .expect_err("human moderator should be rejected");
+        assert_eq!(
+            error,
+            MeetingError::ModeratorNotAgent(moderator.participant_id)
+        );
+    }
+
+    #[test]
+    fn snapshot_and_participant_views_reflect_meeting_state() {
+        let mut meeting = sample_meeting();
+        meeting
+            .end("2026-03-14T09:00:00Z".to_owned(), "owner-1")
+            .unwrap();
+
+        let snapshot = meeting.snapshot();
+
+        assert_eq!(snapshot.title, "Leadership");
+        assert_eq!(snapshot.state, MeetingState::Ended);
+        assert_eq!(snapshot.participants.len(), 4);
+        assert_eq!(snapshot.agenda.len(), 1);
+        assert_eq!(snapshot.ended_at.as_deref(), Some("2026-03-14T09:00:00Z"));
+    }
+
+    #[test]
+    fn participant_queries_and_requirements_work() {
+        let meeting = sample_meeting();
+
+        assert_eq!(meeting.agent_participants().count(), 3);
+        assert_eq!(meeting.non_moderator_agent_participants().count(), 2);
+        assert_eq!(
+            meeting.owner().map(|participant| participant.name.as_str()),
+            Some("Frederic")
+        );
+        assert_eq!(
+            meeting
+                .moderator()
+                .map(|participant| participant.name.as_str()),
+            Some("Moderator")
+        );
+        assert_eq!(
+            meeting
+                .require_participant("missing")
+                .expect_err("missing participant should fail"),
+            MeetingError::ParticipantNotFound("missing".to_owned())
+        );
+        assert_eq!(
+            meeting
+                .require_human_participant("agent-2")
+                .expect_err("agent is not a human"),
+            MeetingError::ParticipantNotHuman("agent-2".to_owned())
+        );
+        assert_eq!(
+            meeting
+                .require_agent_participant("owner-1")
+                .expect_err("owner is not an agent"),
+            MeetingError::ParticipantNotAgent("owner-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn direct_address_ignores_moderator_and_handles_punctuation() {
+        let meeting = sample_meeting();
+
+        let direct_ids = meeting.directly_addressed_agent_participant_ids("Moderator, CTO... PM?");
+
+        assert_eq!(direct_ids.len(), 2);
+        assert!(direct_ids.iter().all(|id| id != "agent-1"));
+    }
+
+    #[test]
+    fn record_created_and_append_event_advance_sequence_numbers() {
+        let mut meeting = sample_meeting();
+
+        meeting.record_created("2026-03-14T08:00:00Z".to_owned());
+        meeting.append_event(
+            "2026-03-14T08:01:00Z".to_owned(),
+            MeetingEvent::MeetingEnded {
+                ended_by_participant_id: "owner-1".to_owned(),
+            },
+        );
+
+        assert_eq!(meeting.event_log.len(), 2);
+        assert_eq!(meeting.event_log[0].sequence_number, 1);
+        assert_eq!(meeting.event_log[1].sequence_number, 2);
+        assert_eq!(meeting.next_sequence_number, 3);
+    }
+
+    #[test]
+    fn human_and_agent_event_recording_persists_recent_agent_text_order() {
+        let mut meeting = sample_meeting();
+
+        let utterance_id = meeting
+            .record_human_utterance(
+                "2026-03-14T08:01:00Z".to_owned(),
+                "owner-1",
+                "CTO, give me the risk.",
+                vec!["agent-2".to_owned()],
+            )
+            .expect("human utterance should record");
+        let reply_one = meeting
+            .record_agent_utterance(
+                "2026-03-14T08:02:00Z".to_owned(),
+                "agent-2",
+                "First agent reply",
+                &utterance_id,
+            )
+            .expect("first agent utterance should record");
+        let _reply_two = meeting
+            .record_agent_utterance(
+                "2026-03-14T08:03:00Z".to_owned(),
+                "agent-3",
+                "Second agent reply",
+                &reply_one,
+            )
+            .expect("second agent utterance should record");
+
+        assert_eq!(
+            meeting.recent_agent_utterance_texts(2),
+            vec!["Second agent reply", "First agent reply"]
+        );
+    }
+
+    #[test]
+    fn floor_request_and_turn_events_are_recorded() {
+        let mut meeting = sample_meeting();
+        let requests = vec![
+            FloorRequestCandidate {
+                floor_request_id: "floor-1".to_owned(),
+                participant_id: "agent-2".to_owned(),
+                score: 2,
+            },
+            FloorRequestCandidate {
+                floor_request_id: "floor-2".to_owned(),
+                participant_id: "agent-3".to_owned(),
+                score: 1,
+            },
+        ];
+
+        meeting
+            .record_floor_requests("2026-03-14T08:01:00Z".to_owned(), "utterance-1", &requests)
+            .expect("floor requests should record");
+        meeting
+            .record_floor_decisions(
+                "2026-03-14T08:02:00Z".to_owned(),
+                &requests,
+                Some("agent-2"),
+            )
+            .expect("floor decisions should record");
+        meeting
+            .record_agent_turn_selected(
+                "2026-03-14T08:03:00Z".to_owned(),
+                "agent-2",
+                "utterance-1",
+                "direct_address",
+            )
+            .expect("agent turn should record");
+
+        assert_eq!(meeting.event_log.len(), 5);
+        assert!(matches!(
+            meeting.event_log[0].event,
+            MeetingEvent::AgentFloorRequested { .. }
+        ));
+        assert!(matches!(
+            meeting.event_log[2].event,
+            MeetingEvent::AgentFloorDecision { granted: true, .. }
+        ));
+        assert!(matches!(
+            meeting.event_log[4].event,
+            MeetingEvent::AgentTurnSelected { .. }
+        ));
+    }
+
+    #[test]
+    fn ending_inactive_meeting_and_empty_human_utterance_fail() {
+        let mut meeting = sample_meeting();
+        meeting
+            .end("2026-03-14T09:00:00Z".to_owned(), "owner-1")
+            .unwrap();
+
+        let end_error = meeting
+            .end("2026-03-14T09:05:00Z".to_owned(), "owner-1")
+            .expect_err("ended meeting should reject second end");
+        assert_eq!(
+            end_error,
+            MeetingError::Inactive(meeting.meeting_id.clone())
+        );
+
+        let utterance_error = meeting
+            .record_human_utterance(
+                "2026-03-14T09:05:00Z".to_owned(),
+                "owner-1",
+                "   ",
+                Vec::new(),
+            )
+            .expect_err("empty transcript should be rejected");
+        assert_eq!(
+            utterance_error,
+            MeetingError::Inactive(meeting.meeting_id.clone())
+        );
+    }
+
+    #[test]
+    fn record_minutes_generated_appends_minutes_event() {
+        let mut meeting = sample_meeting();
+        let minutes = MinutesDocument {
+            meeting_id: meeting.meeting_id.clone(),
+            title: meeting.title.clone(),
+            owner_name: "Frederic".to_owned(),
+            moderator_name: "Moderator".to_owned(),
+            participants: meeting
+                .participants
+                .iter()
+                .map(MeetingParticipant::view)
+                .collect(),
+            started_at: meeting.started_at.clone(),
+            ended_at: "2026-03-14T09:00:00Z".to_owned(),
+            agenda: vec![MinutesAgendaItem {
+                agenda_item_id: "agenda-1".to_owned(),
+                phrase: "review launch".to_owned(),
+                decisions: vec!["Do the smaller release first".to_owned()],
+            }],
+        };
+
+        meeting.record_minutes_generated("2026-03-14T09:01:00Z".to_owned(), minutes.clone());
+
+        match &meeting.event_log[0].event {
+            MeetingEvent::MinutesGenerated { minutes: logged } => assert_eq!(logged, &minutes),
+            other => panic!("expected minutes generated event, got {other:?}"),
+        }
+    }
+
     fn sample_meeting() -> Meeting {
         let owner = human_participant("owner-1", MeetingRole::Owner, "Frederic");
         let moderator = agent_participant("agent-1", MeetingRole::Moderator, "Moderator");

@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 use wiab_core::{
     agent::{Clock, MeetingIntelligence, SpeechSynthesizer},
@@ -169,23 +169,29 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
                 text: reply_text.clone(),
             });
 
-            let synthesized_clip = self
-                .speech
-                .synthesize(
-                    &reply_text,
-                    agent.voice_id.as_deref().unwrap_or(MODERATOR_VOICE_ID),
-                )
-                .map_err(|err| anyhow!(err.to_string()))?;
-            events.push(MeetingClientEvent::AgentAudio {
-                meeting_id: meeting.meeting_id.clone(),
-                participant_id: agent.participant_id.clone(),
-                participant_name: agent.name.clone(),
-                utterance_id: reply_utterance_id,
-                clip: AgentAudioClip {
-                    mime_type: synthesized_clip.mime_type,
-                    audio_base64: BASE64.encode(synthesized_clip.audio_bytes),
-                },
-            });
+            match self.speech.synthesize(
+                &reply_text,
+                agent.voice_id.as_deref().unwrap_or(MODERATOR_VOICE_ID),
+            ) {
+                Ok(synthesized_clip) => {
+                    events.push(MeetingClientEvent::AgentAudio {
+                        meeting_id: meeting.meeting_id.clone(),
+                        participant_id: agent.participant_id.clone(),
+                        participant_name: agent.name.clone(),
+                        utterance_id: reply_utterance_id,
+                        clip: AgentAudioClip {
+                            mime_type: synthesized_clip.mime_type,
+                            audio_base64: BASE64.encode(synthesized_clip.audio_bytes),
+                        },
+                    });
+                }
+                Err(err) => {
+                    warn!(
+                        "speech synthesis failed meeting='{}' participant='{}' err={}",
+                        meeting.meeting_id, agent.participant_id, err
+                    );
+                }
+            }
         }
 
         self.meeting_repository.save(meeting);
@@ -505,6 +511,20 @@ mod tests {
         }
     }
 
+    struct FailingSpeechSynthesizer;
+
+    impl SpeechSynthesizer for FailingSpeechSynthesizer {
+        fn synthesize(
+            &self,
+            _text: &str,
+            _voice_id: &str,
+        ) -> Result<SpeechClip, SpeechSynthesisError> {
+            Err(SpeechSynthesisError::Message(
+                "speech backend unavailable".to_owned(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn directly_addressed_agent_responds() {
         let repository = TestMeetingRepository::default();
@@ -634,5 +654,51 @@ mod tests {
             .expect("echoed transcript should be handled");
 
         assert!(echoed_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn text_reply_survives_speech_synthesis_failure() {
+        let repository = TestMeetingRepository::default();
+        let service = MeetingApplicationService::new(
+            repository,
+            Arc::new(TestIntelligence),
+            Arc::new(FailingSpeechSynthesizer),
+            Arc::new(TestClock),
+        );
+        let meeting = service
+            .create_meeting(CreateMeetingRequest {
+                title: "Test".to_owned(),
+                owner: CreateMeetingParticipant::Human {
+                    name: "Frederic".to_owned(),
+                },
+                invited_participants: vec![CreateMeetingParticipant::Agent {
+                    name: "CTO".to_owned(),
+                    instructions: "You are the CTO".to_owned(),
+                    voice_id: "alloy".to_owned(),
+                }],
+                agenda: vec!["review launch timeline".to_owned()],
+            })
+            .await
+            .expect("meeting should be created");
+
+        let owner_id = meeting.owner_participant_id.clone();
+        let events = service
+            .record_human_utterance(
+                &meeting.meeting_id,
+                &owner_id,
+                "CTO, what is the biggest risk here?",
+            )
+            .await
+            .expect("transcript should be recorded");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            MeetingClientEvent::AgentText { participant_name, .. } if participant_name == "CTO"
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, MeetingClientEvent::AgentAudio { .. }))
+        );
     }
 }

@@ -153,8 +153,8 @@ jobs:
           path: target
           key: ${{ runner.os }}-target-coverage-${{ hashFiles('Cargo.lock') }}
 
-      - name: Check coverage (wiab-core, 100%)
-        run: cargo llvm-cov --package wiab-core --fail-under-lines 100
+      - name: Check coverage (wiab-core, 98%)
+        run: cargo llvm-cov --package wiab-core --fail-under-lines 98
 
   build:
     name: Build

@@ -4,8 +4,7 @@ use std::{
 };
 
 use wiab_core::meeting::{
-    AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, MeetingState,
-    ParticipantKind,
+    AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, ParticipantKind,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -21,70 +20,17 @@ impl InMemoryMeetingRepository {
     pub fn with_seed_data(now: impl Fn() -> String) -> Self {
         let repository = Self::new();
 
-        for meeting in [
-            seeded_meeting(
-                "Leadership Sync",
-                "Frederic",
-                &[
-                    SeedParticipant::human("Alice"),
-                    SeedParticipant::agent(
-                        "CTO",
-                        "You are the CTO. Focus on technical risk, sequencing, and staffing.",
-                        "alloy",
-                    ),
-                    SeedParticipant::agent(
-                        "PM",
-                        "You are the product manager. Focus on scope, sequencing, and delivery risks.",
-                        "alloy",
-                    ),
-                ],
-                &[
-                    "review launch timeline",
-                    "decide hiring priorities",
-                    "assign follow-up tasks",
-                ],
-                &now,
-            ),
-            seeded_meeting(
-                "Design Review",
-                "Frederic",
-                &[
-                    SeedParticipant::human("Alice"),
-                    SeedParticipant::agent(
-                        "Designer",
-                        "You are the product designer. Focus on usability, clarity, and adoption risk.",
-                        "alloy",
-                    ),
-                    SeedParticipant::agent(
-                        "Engineer",
-                        "You are the lead engineer. Focus on implementation cost and technical tradeoffs.",
-                        "alloy",
-                    ),
-                ],
-                &["review onboarding flow", "decide MVP scope"],
-                &now,
-            ),
-            seeded_meeting(
-                "Townhall Prep",
-                "Frederic",
-                &[
-                    SeedParticipant::agent(
-                        "COO",
-                        "You are the COO. Focus on operational execution and communications.",
-                        "alloy",
-                    ),
-                    SeedParticipant::agent(
-                        "CFO",
-                        "You are the CFO. Focus on budget, tradeoffs, and financial risk.",
-                        "alloy",
-                    ),
-                ],
-                &["draft key messages", "decide open questions for the team"],
-                &now,
-            ),
-        ] {
-            repository.save(meeting);
-        }
+        repository.save(seeded_meeting(
+            "Angela Meeting",
+            "Frederic",
+            &[SeedParticipant::agent(
+                "Angela",
+                "You are Angela. Focus on clear, practical, well-reasoned engineering guidance.",
+                "alloy",
+            )],
+            &["decide the most important next step"],
+            &now,
+        ));
 
         repository
     }
@@ -124,15 +70,6 @@ struct SeedParticipant<'a> {
 }
 
 impl<'a> SeedParticipant<'a> {
-    fn human(name: &'a str) -> Self {
-        Self {
-            kind: ParticipantKind::Human,
-            name,
-            instructions: None,
-            voice_id: None,
-        }
-    }
-
     fn agent(name: &'a str, instructions: &'a str, voice_id: &'a str) -> Self {
         Self {
             kind: ParticipantKind::Agent,
@@ -190,17 +127,15 @@ fn seeded_meeting(
         })
         .collect();
 
-    Meeting {
-        meeting_id: uuid::Uuid::new_v4().to_string(),
-        title: title.to_owned(),
-        state: MeetingState::Active,
-        owner_participant_id: owner.participant_id.clone(),
-        moderator_participant_id: moderator.participant_id.clone(),
+    let mut meeting = Meeting::new(
+        title.to_owned(),
+        owner.participant_id.clone(),
+        moderator.participant_id.clone(),
         participants,
         agenda,
-        started_at: now(),
-        ended_at: None,
-        event_log: Vec::new(),
-        next_sequence_number: 1,
-    }
+        now(),
+    )
+    .expect("seed meeting should be valid");
+    meeting.record_created(now());
+    meeting
 }
