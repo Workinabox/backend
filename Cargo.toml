@@ -12,6 +12,7 @@ wiab-inf = { path = "crates/wiab-inf" }
 wiab-app = { path = "crates/wiab-app" }
 anyhow = "1.0"
 axum = { version = "0.8", features = ["macros", "ws"] }
+base64 = "0.22"
 futures-util = "0.3"
 mediasoup = "0.20"
 opus = "0.3"
@@ -27,6 +28,7 @@ whisper-rs = "0.12"
 
 [dependencies]
 wiab-app = { workspace = true }
+wiab-core = { workspace = true }
 wiab-inf = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+wiab-app = { workspace = true }
 wiab-core = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }

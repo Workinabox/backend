@@ -1,49 +1,17 @@
-use std::{net::SocketAddr, sync::Arc};
+mod bootstrap;
+
+use std::net::SocketAddr;
 
 use anyhow::Context;
-use axum::{
-    Json, Router,
-    extract::{State, ws::WebSocketUpgrade},
-    response::IntoResponse,
-    routing::get,
-};
 use tracing::info;
-use wiab_app::{RoomApplicationService, RoomView};
-use wiab_inf::{InMemoryRoomRepository, Sfu, handle_signal_socket};
-
-#[derive(Clone)]
-struct AppState {
-    room_repository: InMemoryRoomRepository,
-    sfu: Arc<Sfu>,
-}
+use wiab_inf::http_router;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "wiab=info,tower_http=info".to_owned()),
-        )
-        .init();
+    init_tracing();
 
-    let room_repository = InMemoryRoomRepository::with_seed_data()
-        .context("failed to seed in-memory room repository")?;
-    let room_service = RoomApplicationService::new(room_repository.clone());
-    let rooms = room_service.list_rooms();
-    info!("loaded {} rooms from startup data", rooms.len());
-    for room in &rooms {
-        info!("room '{}' capacity {}", room.room_id, room.capacity);
-    }
-
-    let state = AppState {
-        room_repository,
-        sfu: Arc::new(Sfu::new().await.context("failed to initialize SFU")?),
-    };
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/rooms", get(list_rooms))
-        .route("/signal", get(signal))
-        .with_state(state);
+    let state = bootstrap::build_app_state().await?;
+    let app = http_router(state);
 
     let addr: SocketAddr = "0.0.0.0:8080"
         .parse()
@@ -60,15 +28,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health() -> &'static str {
-    "ok"
-}
-
-async fn list_rooms(State(state): State<AppState>) -> Json<Vec<RoomView>> {
-    let room_service = RoomApplicationService::new(state.room_repository.clone());
-    Json(room_service.list_rooms())
-}
-
-async fn signal(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_signal_socket(state.sfu, socket))
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "wiab=info,tower_http=info".to_owned()),
+        )
+        .init();
 }
