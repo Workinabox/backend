@@ -1,10 +1,7 @@
-use wiab_core::meeting::MinutesDocument;
-
-#[derive(Debug, Clone)]
-pub struct AgentAudioClip {
-    pub mime_type: String,
-    pub audio_base64: String,
-}
+use wiab_core::{
+    agent::SpeechClip,
+    meeting::MinutesDocument,
+};
 
 #[derive(Debug, Clone)]
 pub enum MeetingClientEvent {
@@ -15,12 +12,12 @@ pub enum MeetingClientEvent {
         utterance_id: String,
         text: String,
     },
-    AgentAudio {
+    AgentSpeech {
         meeting_id: String,
         participant_id: String,
         participant_name: String,
         utterance_id: String,
-        clip: AgentAudioClip,
+        clip: SpeechClip,
     },
     MeetingEnded {
         meeting_id: String,

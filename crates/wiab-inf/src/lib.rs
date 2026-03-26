@@ -1,7 +1,10 @@
+pub mod agent_audio_transport;
 pub mod app_state;
 pub mod heuristic_meeting_intelligence;
 pub mod http_api;
 pub mod in_memory_meeting_repository;
+pub mod llama_meeting_intelligence;
+pub mod llama_runtime;
 pub mod sfu;
 pub mod speech_synthesizer;
 pub mod system_clock;
@@ -11,6 +14,7 @@ pub use app_state::AppState;
 pub use heuristic_meeting_intelligence::HeuristicMeetingIntelligence;
 pub use http_api::router as http_router;
 pub use in_memory_meeting_repository::InMemoryMeetingRepository;
+pub use llama_meeting_intelligence::LlamaMeetingIntelligence;
 pub use sfu::{Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;
 pub use system_clock::SystemClock;

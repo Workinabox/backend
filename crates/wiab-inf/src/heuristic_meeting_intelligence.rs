@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 use wiab_core::{
-    agent::{FloorRequestCandidate, MeetingIntelligence},
+    agent::{FloorRequestCandidate, MeetingIntelligence, MeetingIntelligenceError},
     meeting::{
         AgendaItem, Meeting, MeetingEvent, MeetingParticipant, MinutesAgendaItem, MinutesDocument,
     },
@@ -73,18 +73,18 @@ impl MeetingIntelligence for HeuristicMeetingIntelligence {
         meeting: &Meeting,
         agent: &MeetingParticipant,
         utterance_text: &str,
-    ) -> String {
+    ) -> Result<String, MeetingIntelligenceError> {
         let agenda_context = best_matching_agenda_phrase(meeting, utterance_text)
             .unwrap_or_else(|| "the current discussion".to_owned());
         let recommendation = role_based_recommendation(agent, utterance_text);
-        format!(
+        Ok(format!(
             "{} here. For {}, I would focus on {}.",
             agent.name, agenda_context, recommendation
-        )
+        ))
     }
 
-    fn generate_minutes(&self, meeting: &Meeting) -> MinutesDocument {
-        MinutesDocument {
+    fn generate_minutes(&self, meeting: &Meeting) -> Result<MinutesDocument, MeetingIntelligenceError> {
+        Ok(MinutesDocument {
             meeting_id: meeting.meeting_id.clone(),
             title: meeting.title.clone(),
             owner_name: meeting
@@ -114,7 +114,7 @@ impl MeetingIntelligence for HeuristicMeetingIntelligence {
                     decisions: collect_decisions_for_agenda_item(meeting, item),
                 })
                 .collect(),
-        }
+        })
     }
 }
 

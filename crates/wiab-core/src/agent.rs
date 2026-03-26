@@ -21,6 +21,12 @@ pub enum SpeechSynthesisError {
     Message(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MeetingIntelligenceError {
+    #[error("{0}")]
+    Message(String),
+}
+
 pub trait MeetingIntelligence: Send + Sync {
     fn evaluate_floor_requests(
         &self,
@@ -41,9 +47,12 @@ pub trait MeetingIntelligence: Send + Sync {
         meeting: &Meeting,
         agent: &MeetingParticipant,
         utterance_text: &str,
-    ) -> String;
+    ) -> Result<String, MeetingIntelligenceError>;
 
-    fn generate_minutes(&self, meeting: &Meeting) -> MinutesDocument;
+    fn generate_minutes(
+        &self,
+        meeting: &Meeting,
+    ) -> Result<MinutesDocument, MeetingIntelligenceError>;
 }
 
 pub trait SpeechSynthesizer: Send + Sync {
