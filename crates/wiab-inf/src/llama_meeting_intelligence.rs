@@ -184,7 +184,11 @@ fn reply_system_prompt(agent: &MeetingParticipant) -> String {
     prompt
 }
 
-fn reply_user_prompt(meeting: &Meeting, agent: &MeetingParticipant, utterance_text: &str) -> String {
+fn reply_user_prompt(
+    meeting: &Meeting,
+    agent: &MeetingParticipant,
+    utterance_text: &str,
+) -> String {
     let speaker_name = latest_human_speaker_name(meeting).unwrap_or("the human speaker");
     format!(
         "Agent name: {agent_name}\nHuman speaker name: {speaker_name}\nMeeting title: {title}\n\nHuman said:\n{utterance}\n\nReply as {agent_name} in one or two short sentences.",
@@ -254,12 +258,16 @@ fn full_utterance_lines(meeting: &Meeting) -> String {
 }
 
 fn latest_human_speaker_name(meeting: &Meeting) -> Option<&str> {
-    meeting.event_log.iter().rev().find_map(|entry| match &entry.event {
-        MeetingEvent::HumanUtteranceRecorded { participant_id, .. } => meeting
-            .participant(participant_id)
-            .map(|participant| participant.name.as_str()),
-        _ => None,
-    })
+    meeting
+        .event_log
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            MeetingEvent::HumanUtteranceRecorded { participant_id, .. } => meeting
+                .participant(participant_id)
+                .map(|participant| participant.name.as_str()),
+            _ => None,
+        })
 }
 
 fn utterance_line(

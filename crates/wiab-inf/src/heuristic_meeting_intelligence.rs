@@ -83,7 +83,10 @@ impl MeetingIntelligence for HeuristicMeetingIntelligence {
         ))
     }
 
-    fn generate_minutes(&self, meeting: &Meeting) -> Result<MinutesDocument, MeetingIntelligenceError> {
+    fn generate_minutes(
+        &self,
+        meeting: &Meeting,
+    ) -> Result<MinutesDocument, MeetingIntelligenceError> {
         Ok(MinutesDocument {
             meeting_id: meeting.meeting_id.clone(),
             title: meeting.title.clone(),

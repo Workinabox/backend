@@ -1,12 +1,9 @@
 use std::{
-    num::{NonZeroU32, NonZeroU8},
+    num::{NonZeroU8, NonZeroU32},
     time::Duration,
 };
 
-use mediasoup::{
-    prelude::*,
-    producer::DirectProducer,
-};
+use mediasoup::{prelude::*, producer::DirectProducer};
 use opus::{Application as OpusApplication, Channels as OpusChannels, Encoder as OpusEncoder};
 use thiserror::Error;
 use tokio::time::sleep;
@@ -54,14 +51,16 @@ impl AgentAudioSource {
     pub async fn new(direct_transport: &DirectTransport) -> Result<Self, AgentAudioTransportError> {
         let seed = Uuid::new_v4();
         let seed_bytes = seed.as_bytes();
-        let ssrc =
-            u32::from_be_bytes([seed_bytes[0], seed_bytes[1], seed_bytes[2], seed_bytes[3]]);
+        let ssrc = u32::from_be_bytes([seed_bytes[0], seed_bytes[1], seed_bytes[2], seed_bytes[3]]);
         let sequence_number = u16::from_be_bytes([seed_bytes[4], seed_bytes[5]]);
         let timestamp =
             u32::from_be_bytes([seed_bytes[6], seed_bytes[7], seed_bytes[8], seed_bytes[9]]);
 
         let producer = direct_transport
-            .produce(ProducerOptions::new(MediaKind::Audio, agent_audio_rtp_parameters(ssrc)))
+            .produce(ProducerOptions::new(
+                MediaKind::Audio,
+                agent_audio_rtp_parameters(ssrc),
+            ))
             .await
             .map_err(|err| AgentAudioTransportError::ProducerCreate(err.to_string()))?;
         let Producer::Direct(producer) = producer else {
@@ -292,15 +291,12 @@ fn decode_pcm16_wav(bytes: &[u8]) -> Result<WavPcm16, AgentAudioTransportError> 
         offset = data_end + (chunk_size % 2);
     }
 
-    let channels = channels.ok_or_else(|| {
-        AgentAudioTransportError::InvalidWav("missing fmt chunk".to_owned())
-    })?;
-    let sample_rate = sample_rate.ok_or_else(|| {
-        AgentAudioTransportError::InvalidWav("missing sample rate".to_owned())
-    })?;
-    let data = data_chunk.ok_or_else(|| {
-        AgentAudioTransportError::InvalidWav("missing data chunk".to_owned())
-    })?;
+    let channels = channels
+        .ok_or_else(|| AgentAudioTransportError::InvalidWav("missing fmt chunk".to_owned()))?;
+    let sample_rate = sample_rate
+        .ok_or_else(|| AgentAudioTransportError::InvalidWav("missing sample rate".to_owned()))?;
+    let data = data_chunk
+        .ok_or_else(|| AgentAudioTransportError::InvalidWav("missing data chunk".to_owned()))?;
 
     if data.len() % 2 != 0 {
         return Err(AgentAudioTransportError::InvalidWav(

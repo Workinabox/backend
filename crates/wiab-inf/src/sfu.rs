@@ -808,9 +808,8 @@ impl Sfu {
         utterance_id: &str,
         clip: wiab_core::agent::SpeechClip,
     ) -> anyhow::Result<()> {
-        let (source, created_new_source) = self
-            .agent_audio_source(meeting_id, participant_id)
-            .await?;
+        let (source, created_new_source) =
+            self.agent_audio_source(meeting_id, participant_id).await?;
 
         let source = Arc::clone(&source);
         let meeting_id = meeting_id.to_owned();
