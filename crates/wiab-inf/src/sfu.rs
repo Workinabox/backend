@@ -3,6 +3,7 @@ use std::{
     net::IpAddr,
     num::{NonZeroU8, NonZeroU32},
     sync::{Arc, Mutex as StdMutex},
+    time::Duration as StdDuration,
 };
 
 use anyhow::{Context, anyhow};
@@ -16,7 +17,7 @@ use mediasoup::{
     },
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -27,6 +28,7 @@ use wiab_core::{
 };
 
 use crate::{
+    agent_audio_transport::AgentAudioSource,
     in_memory_meeting_repository::InMemoryMeetingRepository,
     transcription::{LocalTranscriber, TrackAudioTranscriber},
 };
@@ -106,14 +108,6 @@ enum ServerSignal {
         utterance_id: String,
         text: String,
     },
-    AgentAudio {
-        meeting_id: String,
-        participant_id: String,
-        participant_name: String,
-        utterance_id: String,
-        mime_type: String,
-        audio_base64: String,
-    },
     MeetingEnded {
         meeting_id: String,
         ended_by_participant_id: String,
@@ -180,6 +174,7 @@ struct PeerState {
 struct MeetingMediaState {
     peers: HashMap<String, Arc<PeerState>>,
     producer_owners: HashMap<String, String>,
+    agent_audio_sources: HashMap<String, Arc<Mutex<AgentAudioSource>>>,
 }
 
 pub struct Sfu {
@@ -188,6 +183,7 @@ pub struct Sfu {
     router: Router,
     direct_transport: DirectTransport,
     meetings: RwLock<HashMap<String, MeetingMediaState>>,
+    agent_source_creation_guard: Mutex<()>,
     listen_ip: IpAddr,
     announced_address: Option<String>,
     transcriber: Option<Arc<LocalTranscriber>>,
@@ -195,6 +191,7 @@ pub struct Sfu {
 }
 
 const PRODUCER_STATS_LOG_INTERVAL_SECONDS: u64 = 5;
+const AGENT_AUDIO_CONSUMER_ATTACH_GRACE_MS: u64 = 250;
 
 impl Sfu {
     pub async fn new(
@@ -237,6 +234,7 @@ impl Sfu {
             router,
             direct_transport,
             meetings: RwLock::new(HashMap::new()),
+            agent_source_creation_guard: Mutex::new(()),
             listen_ip,
             announced_address,
             transcriber,
@@ -770,9 +768,134 @@ impl Sfu {
         events: &[MeetingClientEvent],
     ) {
         for event in events {
-            let signal = server_signal_from_client_event(event.clone());
-            self.broadcast_signal(meeting_id, signal, None).await;
+            match event.clone() {
+                MeetingClientEvent::AgentSpeech {
+                    meeting_id,
+                    participant_id,
+                    participant_name,
+                    utterance_id,
+                    clip,
+                } => {
+                    if let Err(err) = self
+                        .start_agent_speech_playback(
+                            &meeting_id,
+                            &participant_id,
+                            &participant_name,
+                            &utterance_id,
+                            clip,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "failed to inject agent audio meeting='{}' participant='{}' utterance='{}': {}",
+                            meeting_id, participant_id, utterance_id, err
+                        );
+                    }
+                }
+                other => {
+                    let signal = server_signal_from_client_event(other);
+                    self.broadcast_signal(meeting_id, signal, None).await;
+                }
+            }
         }
+    }
+
+    async fn start_agent_speech_playback(
+        &self,
+        meeting_id: &str,
+        participant_id: &str,
+        participant_name: &str,
+        utterance_id: &str,
+        clip: wiab_core::agent::SpeechClip,
+    ) -> anyhow::Result<()> {
+        let (source, created_new_source) =
+            self.agent_audio_source(meeting_id, participant_id).await?;
+
+        let source = Arc::clone(&source);
+        let meeting_id = meeting_id.to_owned();
+        let participant_id = participant_id.to_owned();
+        let participant_name = participant_name.to_owned();
+        let utterance_id = utterance_id.to_owned();
+        tokio::spawn(async move {
+            let initial_attach_delay = created_new_source.then_some(StdDuration::from_millis(
+                AGENT_AUDIO_CONSUMER_ATTACH_GRACE_MS,
+            ));
+
+            let playback_result = {
+                let mut source = source.lock().await;
+                source.play_clip(&clip, initial_attach_delay).await
+            };
+
+            if let Err(err) = playback_result {
+                warn!(
+                    "agent audio playback failed meeting='{}' participant='{}' name='{}' utterance='{}': {}",
+                    meeting_id, participant_id, participant_name, utterance_id, err
+                );
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn agent_audio_source(
+        &self,
+        meeting_id: &str,
+        participant_id: &str,
+    ) -> anyhow::Result<(Arc<Mutex<AgentAudioSource>>, bool)> {
+        if let Some(existing_source) = self
+            .meetings
+            .read()
+            .await
+            .get(meeting_id)
+            .and_then(|meeting_media| meeting_media.agent_audio_sources.get(participant_id))
+            .cloned()
+        {
+            return Ok((existing_source, false));
+        }
+
+        let _guard = self.agent_source_creation_guard.lock().await;
+        if let Some(existing_source) = self
+            .meetings
+            .read()
+            .await
+            .get(meeting_id)
+            .and_then(|meeting_media| meeting_media.agent_audio_sources.get(participant_id))
+            .cloned()
+        {
+            return Ok((existing_source, false));
+        }
+
+        let source = Arc::new(Mutex::new(
+            AgentAudioSource::new(&self.direct_transport)
+                .await
+                .map_err(|err| anyhow!("failed to create agent audio source: {err}"))?,
+        ));
+        let producer_id = source.lock().await.producer_id();
+        let peers_to_notify = {
+            let mut meetings = self.meetings.write().await;
+            let meeting_media = meetings
+                .get_mut(meeting_id)
+                .ok_or_else(|| anyhow!("meeting '{}' not found", meeting_id))?;
+            meeting_media
+                .producer_owners
+                .insert(producer_id.clone(), participant_id.to_owned());
+            meeting_media
+                .agent_audio_sources
+                .insert(participant_id.to_owned(), Arc::clone(&source));
+            meeting_media.peers.values().cloned().collect::<Vec<_>>()
+        };
+
+        for peer in peers_to_notify {
+            let _ = peer.signal_tx.send(ServerEnvelope {
+                request_id: None,
+                signal: ServerSignal::NewProducer {
+                    peer_id: participant_id.to_owned(),
+                    producer_id: producer_id.clone(),
+                },
+            });
+        }
+
+        Ok((source, true))
     }
 
     async fn broadcast_signal(
@@ -817,20 +940,9 @@ fn server_signal_from_client_event(event: MeetingClientEvent) -> ServerSignal {
             utterance_id,
             text,
         },
-        MeetingClientEvent::AgentAudio {
-            meeting_id,
-            participant_id,
-            participant_name,
-            utterance_id,
-            clip,
-        } => ServerSignal::AgentAudio {
-            meeting_id,
-            participant_id,
-            participant_name,
-            utterance_id,
-            mime_type: clip.mime_type,
-            audio_base64: clip.audio_base64,
-        },
+        MeetingClientEvent::AgentSpeech { .. } => {
+            unreachable!("agent speech is injected into mediasoup, not signaled to clients")
+        }
         MeetingClientEvent::MeetingEnded {
             meeting_id,
             ended_by_participant_id,

@@ -4,18 +4,22 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::info;
 use wiab_app::MeetingApplicationService;
-use wiab_core::{agent::Clock, transcript::FinalizedTranscript};
+use wiab_core::{
+    agent::{Clock, MeetingIntelligence},
+    transcript::FinalizedTranscript,
+};
 use wiab_inf::{
     AppState, DefaultSpeechSynthesizer, HeuristicMeetingIntelligence, InMemoryMeetingRepository,
-    Sfu, SystemClock,
+    LlamaMeetingIntelligence, Sfu, SystemClock,
 };
 
 pub async fn build_app_state() -> anyhow::Result<AppState> {
     let seed_clock = SystemClock;
     let meeting_repository = InMemoryMeetingRepository::with_seed_data(|| seed_clock.now_rfc3339());
+    let intelligence = load_meeting_intelligence()?;
     let meeting_service = Arc::new(MeetingApplicationService::new(
         meeting_repository.clone(),
-        Arc::new(HeuristicMeetingIntelligence),
+        intelligence,
         Arc::new(DefaultSpeechSynthesizer::from_env()),
         Arc::new(SystemClock),
     ));
@@ -53,4 +57,27 @@ fn spawn_transcript_runtime(
             sfu.handle_finalized_transcript(transcript).await;
         }
     });
+}
+
+fn load_meeting_intelligence() -> anyhow::Result<Arc<dyn MeetingIntelligence>> {
+    match std::env::var("WIAB_MEETING_INTELLIGENCE")
+        .unwrap_or_else(|_| "heuristic".to_owned())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "heuristic" => {
+            info!("meeting intelligence adapter: heuristic");
+            Ok(Arc::new(HeuristicMeetingIntelligence))
+        }
+        "llama" => {
+            let intelligence = LlamaMeetingIntelligence::from_env()
+                .context("failed to initialize llama meeting intelligence")?;
+            info!("meeting intelligence adapter: llama");
+            Ok(Arc::new(intelligence))
+        }
+        other => Err(anyhow::anyhow!(
+            "unsupported WIAB_MEETING_INTELLIGENCE value '{other}'"
+        )),
+    }
 }

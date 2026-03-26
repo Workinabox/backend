@@ -9,11 +9,16 @@ wiab-core = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
+llama-cpp-2 = { workspace = true, features = ["dynamic-link"] }
 mediasoup = { workspace = true }
 opus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 whisper-rs = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { workspace = true, features = ["dynamic-link", "metal"] }

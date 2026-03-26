@@ -5,6 +5,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -20,6 +21,8 @@ use wiab_core::{
     },
     transcript::{FinalizedTranscript, TranscriptIdentity, TranscriptJob},
 };
+
+const INGEST_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct LocalTranscriber {
@@ -108,6 +111,10 @@ fn run_transcription_worker(
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_special(false);
+        // We only need text for short streaming chunks. Timestamp token generation can cause
+        // whisper.cpp to drop an otherwise valid chunk with "single timestamp ending".
+        params.set_no_timestamps(true);
+        params.set_single_segment(true);
         params.set_translate(false);
         if let Some(language) = language.as_deref() {
             params.set_language(Some(language));
@@ -124,25 +131,25 @@ fn run_transcription_worker(
             continue;
         }
 
-        let segment_count = match state.full_n_segments() {
-            Ok(segment_count) => segment_count,
-            Err(err) => {
-                warn!(
-                    "transcription failed to read segment count meeting='{}' peer='{}' track='{}' chunk={} err={err}",
-                    job.identity.meeting_id,
-                    job.identity.peer_id,
-                    job.identity.track_id,
-                    job.chunk_index
-                );
-                continue;
-            }
-        };
+        let segment_count = state.full_n_segments();
 
         let mut transcript = String::new();
         for segment_idx in 0..segment_count {
-            match state.full_get_segment_text(segment_idx) {
+            let Some(segment) = state.get_segment(segment_idx) else {
+                warn!(
+                    "transcription segment index out of bounds meeting='{}' peer='{}' track='{}' chunk={} segment={}",
+                    job.identity.meeting_id,
+                    job.identity.peer_id,
+                    job.identity.track_id,
+                    job.chunk_index,
+                    segment_idx
+                );
+                continue;
+            };
+
+            match segment.to_str() {
                 Ok(text) => {
-                    transcript.push_str(&text);
+                    transcript.push_str(text);
                     transcript.push(' ');
                 }
                 Err(err) => {
@@ -155,7 +162,7 @@ fn run_transcription_worker(
                         segment_idx
                     );
                 }
-            }
+            };
         }
 
         let transcript = transcript.trim();
@@ -193,6 +200,11 @@ pub struct TrackAudioTranscriber {
     chunk_voiced_ms: f32,
     trailing_silence_ms: f32,
     chunk_index: u64,
+    frames_since_log: u64,
+    voiced_frames_since_log: u64,
+    max_rms_since_log: f32,
+    last_rms: f32,
+    last_log_at: Instant,
 }
 
 impl TrackAudioTranscriber {
@@ -224,6 +236,11 @@ impl TrackAudioTranscriber {
             chunk_voiced_ms: 0.0,
             trailing_silence_ms: 0.0,
             chunk_index: 0,
+            frames_since_log: 0,
+            voiced_frames_since_log: 0,
+            max_rms_since_log: 0.0,
+            last_rms: 0.0,
+            last_log_at: Instant::now(),
         })
     }
 
@@ -277,7 +294,16 @@ impl TrackAudioTranscriber {
         }
 
         let frame_duration_ms = (frame.len() as f32) * 1000.0 / (TRANSCRIPT_SAMPLE_RATE_HZ as f32);
+        let frame_rms = rms(frame);
         let frame_voiced = is_voiced(frame);
+
+        self.frames_since_log += 1;
+        self.last_rms = frame_rms;
+        self.max_rms_since_log = self.max_rms_since_log.max(frame_rms);
+        if frame_voiced {
+            self.voiced_frames_since_log += 1;
+        }
+        self.maybe_log_ingest_diagnostics();
 
         if self.chunk_pcm_16k_mono.is_empty() && !frame_voiced {
             return;
@@ -325,6 +351,15 @@ impl TrackAudioTranscriber {
 
     fn submit_current_chunk(&mut self) {
         let pcm_16k_mono = std::mem::take(&mut self.chunk_pcm_16k_mono);
+        info!(
+            "transcription chunk submitted meeting='{}' peer='{}' track='{}' chunk={} duration_ms={:.0} voiced_ms={:.0}",
+            self.identity.meeting_id,
+            self.identity.peer_id,
+            self.identity.track_id,
+            self.chunk_index,
+            self.chunk_duration_ms,
+            self.chunk_voiced_ms
+        );
         let job = TranscriptJob {
             identity: self.identity.clone(),
             chunk_index: self.chunk_index,
@@ -340,4 +375,43 @@ impl TrackAudioTranscriber {
         self.trailing_silence_ms = 0.0;
         self.chunk_pcm_16k_mono.clear();
     }
+
+    fn maybe_log_ingest_diagnostics(&mut self) {
+        let elapsed = self.last_log_at.elapsed();
+        if elapsed < INGEST_DIAGNOSTIC_INTERVAL {
+            return;
+        }
+
+        info!(
+            "transcription ingest meeting='{}' peer='{}' track='{}' frames={} voiced_frames={} last_rms={:.4} max_rms={:.4} chunk_ms={:.0} voiced_ms={:.0} trailing_silence_ms={:.0}",
+            self.identity.meeting_id,
+            self.identity.peer_id,
+            self.identity.track_id,
+            self.frames_since_log,
+            self.voiced_frames_since_log,
+            self.last_rms,
+            self.max_rms_since_log,
+            self.chunk_duration_ms,
+            self.chunk_voiced_ms,
+            self.trailing_silence_ms
+        );
+
+        self.frames_since_log = 0;
+        self.voiced_frames_since_log = 0;
+        self.max_rms_since_log = 0.0;
+        self.last_log_at = Instant::now();
+    }
+}
+
+fn rms(frame: &[f32]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+
+    let mut square_sum = 0.0f32;
+    for sample in frame {
+        square_sum += sample * sample;
+    }
+
+    (square_sum / frame.len() as f32).sqrt()
 }

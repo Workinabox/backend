@@ -1,13 +1,11 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{anyhow, bail};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task};
 use tracing::{info, warn};
 use uuid::Uuid;
 use wiab_core::{
-    agent::{Clock, MeetingIntelligence, SpeechSynthesizer},
+    agent::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
     meeting::{
         AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, MeetingSnapshot,
         ParticipantKind,
@@ -16,7 +14,7 @@ use wiab_core::{
 
 use crate::{
     create_meeting_request::{CreateMeetingParticipant, CreateMeetingRequest},
-    meeting_client_events::{AgentAudioClip, MeetingClientEvent},
+    meeting_client_events::MeetingClientEvent,
 };
 
 const MODERATOR_NAME: &str = "Moderator";
@@ -117,30 +115,13 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
             directly_addressed_agent_ids.clone(),
         )?;
 
-        let mut selected_agent: Option<(MeetingParticipant, String)> = None;
-        if !directly_addressed_agent_ids.is_empty() {
-            if let Some(agent) =
-                meeting.choose_directly_addressed_agent(&text, &directly_addressed_agent_ids)
-            {
-                selected_agent = Some((agent, "direct_address".to_owned()));
-            }
+        let selected_agent = if directly_addressed_agent_ids.is_empty() {
+            None
         } else {
-            let floor_requests =
-                self.intelligence
-                    .evaluate_floor_requests(&meeting, &text, &utterance_id);
-            meeting.record_floor_requests(self.now(), &utterance_id, &floor_requests)?;
-
-            let granted_id =
-                self.intelligence
-                    .select_floor_request(&meeting, &text, &floor_requests);
-
-            meeting.record_floor_decisions(self.now(), &floor_requests, granted_id.as_deref())?;
-
-            if let Some(participant_id) = granted_id {
-                let agent = meeting.require_agent_participant(&participant_id)?.clone();
-                selected_agent = Some((agent, "floor_request".to_owned()));
-            }
-        }
+            meeting
+                .choose_directly_addressed_agent(&text, &directly_addressed_agent_ids)
+                .map(|agent| (agent, "direct_address".to_owned()))
+        };
 
         let mut events = Vec::new();
         if let Some((agent, reason)) = selected_agent {
@@ -151,9 +132,20 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
                 &reason,
             )?;
 
-            let reply_text = self
-                .intelligence
-                .generate_agent_reply(&meeting, &agent, &text);
+            let reply_text = match self
+                .generate_agent_reply_blocking(meeting.clone(), agent.clone(), text.clone())
+                .await
+            {
+                Ok(reply_text) => reply_text,
+                Err(err) => {
+                    warn!(
+                        "agent reply generation failed meeting='{}' participant='{}' err={}",
+                        meeting.meeting_id, agent.participant_id, err
+                    );
+                    self.meeting_repository.save(meeting);
+                    return Ok(events);
+                }
+            };
             let reply_utterance_id = meeting.record_agent_utterance(
                 self.now(),
                 &agent.participant_id,
@@ -174,15 +166,12 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
                 agent.voice_id.as_deref().unwrap_or(MODERATOR_VOICE_ID),
             ) {
                 Ok(synthesized_clip) => {
-                    events.push(MeetingClientEvent::AgentAudio {
+                    events.push(MeetingClientEvent::AgentSpeech {
                         meeting_id: meeting.meeting_id.clone(),
                         participant_id: agent.participant_id.clone(),
                         participant_name: agent.name.clone(),
                         utterance_id: reply_utterance_id,
-                        clip: AgentAudioClip {
-                            mime_type: synthesized_clip.mime_type,
-                            audio_base64: BASE64.encode(synthesized_clip.audio_bytes),
-                        },
+                        clip: synthesized_clip,
                     });
                 }
                 Err(err) => {
@@ -208,22 +197,35 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         let ended_at = self.now();
         meeting.end(ended_at.clone(), participant_id)?;
 
-        let minutes = self.intelligence.generate_minutes(&meeting);
-        meeting.record_minutes_generated(self.now(), minutes.clone());
+        let minutes = match self.generate_minutes_blocking(meeting.clone()).await {
+            Ok(minutes) => {
+                meeting.record_minutes_generated(self.now(), minutes.clone());
+                Some(minutes)
+            }
+            Err(err) => {
+                warn!(
+                    "minutes generation failed meeting='{}' err={}",
+                    meeting.meeting_id, err
+                );
+                None
+            }
+        };
 
         self.meeting_repository.save(meeting.clone());
 
-        Ok(vec![
-            MeetingClientEvent::MeetingEnded {
-                meeting_id: meeting.meeting_id.clone(),
-                ended_by_participant_id: participant_id.to_owned(),
-                ended_at,
-            },
-            MeetingClientEvent::MinutesReady {
+        let mut events = vec![MeetingClientEvent::MeetingEnded {
+            meeting_id: meeting.meeting_id.clone(),
+            ended_by_participant_id: participant_id.to_owned(),
+            ended_at,
+        }];
+        if let Some(minutes) = minutes {
+            events.push(MeetingClientEvent::MinutesReady {
                 meeting_id: meeting.meeting_id.clone(),
                 minutes,
-            },
-        ])
+            });
+        }
+
+        Ok(events)
     }
 
     fn require_active_meeting(&self, meeting_id: &str) -> anyhow::Result<Meeting> {
@@ -237,6 +239,28 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
 
     fn now(&self) -> String {
         self.clock.now_rfc3339()
+    }
+
+    async fn generate_agent_reply_blocking(
+        &self,
+        meeting: Meeting,
+        agent: MeetingParticipant,
+        text: String,
+    ) -> Result<String, MeetingIntelligenceError> {
+        let intelligence = self.intelligence.clone();
+        task::spawn_blocking(move || intelligence.generate_agent_reply(&meeting, &agent, &text))
+            .await
+            .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
+    }
+
+    async fn generate_minutes_blocking(
+        &self,
+        meeting: Meeting,
+    ) -> Result<wiab_core::meeting::MinutesDocument, MeetingIntelligenceError> {
+        let intelligence = self.intelligence.clone();
+        task::spawn_blocking(move || intelligence.generate_minutes(&meeting))
+            .await
+            .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
     }
 }
 
@@ -463,12 +487,15 @@ mod tests {
             _meeting: &Meeting,
             agent: &MeetingParticipant,
             _utterance_text: &str,
-        ) -> String {
-            format!("{} recommends reducing launch scope", agent.name)
+        ) -> Result<String, MeetingIntelligenceError> {
+            Ok(format!("{} recommends reducing launch scope", agent.name))
         }
 
-        fn generate_minutes(&self, meeting: &Meeting) -> wiab_core::meeting::MinutesDocument {
-            MinutesDocument {
+        fn generate_minutes(
+            &self,
+            meeting: &Meeting,
+        ) -> Result<wiab_core::meeting::MinutesDocument, MeetingIntelligenceError> {
+            Ok(MinutesDocument {
                 meeting_id: meeting.meeting_id.clone(),
                 title: meeting.title.clone(),
                 owner_name: "Frederic".to_owned(),
@@ -492,7 +519,7 @@ mod tests {
                         decisions: Vec::new(),
                     })
                     .collect(),
-            }
+            })
         }
     }
 
@@ -564,6 +591,40 @@ mod tests {
             event,
             MeetingClientEvent::AgentText { participant_name, .. } if participant_name == "CTO"
         )));
+    }
+
+    #[tokio::test]
+    async fn unaddressed_agent_does_not_respond() {
+        let repository = TestMeetingRepository::default();
+        let service = MeetingApplicationService::new(
+            repository,
+            Arc::new(TestIntelligence),
+            Arc::new(TestSpeechSynthesizer),
+            Arc::new(TestClock),
+        );
+        let meeting = service
+            .create_meeting(CreateMeetingRequest {
+                title: "Test".to_owned(),
+                owner: CreateMeetingParticipant::Human {
+                    name: "Frederic".to_owned(),
+                },
+                invited_participants: vec![CreateMeetingParticipant::Agent {
+                    name: "Angela".to_owned(),
+                    instructions: "You are Angela".to_owned(),
+                    voice_id: "alloy".to_owned(),
+                }],
+                agenda: vec!["review launch timeline".to_owned()],
+            })
+            .await
+            .expect("meeting should be created");
+
+        let owner_id = meeting.owner_participant_id.clone();
+        let events = service
+            .record_human_utterance(&meeting.meeting_id, &owner_id, "What should we do next?")
+            .await
+            .expect("transcript should be recorded");
+
+        assert!(events.is_empty());
     }
 
     #[tokio::test]
@@ -698,7 +759,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, MeetingClientEvent::AgentAudio { .. }))
+                .any(|event| matches!(event, MeetingClientEvent::AgentSpeech { .. }))
         );
     }
 }
