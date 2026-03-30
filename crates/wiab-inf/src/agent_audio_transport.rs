@@ -8,7 +8,7 @@ use opus::{Application as OpusApplication, Channels as OpusChannels, Encoder as 
 use thiserror::Error;
 use tokio::time::sleep;
 use uuid::Uuid;
-use wiab_core::agent::SpeechClip;
+use wiab_core::meeting_traits::SpeechClip;
 
 const RTP_SAMPLE_RATE_HZ: u32 = 48_000;
 const RTP_CHANNELS: u8 = 2;

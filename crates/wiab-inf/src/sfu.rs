@@ -806,7 +806,7 @@ impl Sfu {
         participant_id: &str,
         participant_name: &str,
         utterance_id: &str,
-        clip: wiab_core::agent::SpeechClip,
+        clip: wiab_core::meeting_traits::SpeechClip,
     ) -> anyhow::Result<()> {
         let (source, created_new_source) =
             self.agent_audio_source(meeting_id, participant_id).await?;

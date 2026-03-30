@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use uuid::Uuid;
-use wiab_core::agent::{SpeechClip, SpeechSynthesisError, SpeechSynthesizer};
+use wiab_core::meeting_traits::{SpeechClip, SpeechSynthesisError, SpeechSynthesizer};
 
 pub struct DefaultSpeechSynthesizer {
     implementation: SpeechSynthesizerImpl,

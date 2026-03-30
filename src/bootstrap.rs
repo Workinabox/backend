@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 use wiab_app::MeetingApplicationService;
 use wiab_core::{
-    agent::{Clock, MeetingIntelligence},
+    meeting_traits::{Clock, MeetingIntelligence},
     transcript::FinalizedTranscript,
 };
 use wiab_inf::{
