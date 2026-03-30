@@ -5,7 +5,7 @@ use tokio::{sync::Mutex, task};
 use tracing::{info, warn};
 use uuid::Uuid;
 use wiab_core::{
-    agent::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
+    meeting_traits::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
     meeting::{
         AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, MeetingSnapshot,
         ParticipantKind,
@@ -416,7 +416,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use wiab_core::{
-        agent::{
+        meeting_traits::{
             Clock, FloorRequestCandidate, MeetingIntelligence, SpeechClip, SpeechSynthesisError,
         },
         meeting::{MeetingRepository, MinutesAgendaItem, MinutesDocument, ParticipantKind},

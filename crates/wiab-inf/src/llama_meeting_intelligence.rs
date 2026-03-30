@@ -3,7 +3,7 @@ use std::thread;
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use wiab_core::{
-    agent::{FloorRequestCandidate, MeetingIntelligence, MeetingIntelligenceError},
+    meeting_traits::{FloorRequestCandidate, MeetingIntelligence, MeetingIntelligenceError},
     meeting::{Meeting, MeetingEvent, MeetingParticipant, MinutesAgendaItem, MinutesDocument},
 };
 

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 use wiab_core::{
-    agent::{FloorRequestCandidate, MeetingIntelligence, MeetingIntelligenceError},
+    meeting_traits::{FloorRequestCandidate, MeetingIntelligence, MeetingIntelligenceError},
     meeting::{
         AgendaItem, Meeting, MeetingEvent, MeetingParticipant, MinutesAgendaItem, MinutesDocument,
     },

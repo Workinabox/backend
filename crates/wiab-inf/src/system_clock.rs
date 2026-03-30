@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wiab_core::agent::Clock;
+use wiab_core::meeting_traits::Clock;
 
 pub struct SystemClock;
 
