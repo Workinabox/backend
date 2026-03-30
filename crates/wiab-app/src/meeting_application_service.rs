@@ -5,11 +5,11 @@ use tokio::{sync::Mutex, task};
 use tracing::{info, warn};
 use uuid::Uuid;
 use wiab_core::{
-    meeting_traits::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
     meeting::{
         AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, MeetingSnapshot,
         ParticipantKind,
     },
+    meeting_traits::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
 };
 
 use crate::{
@@ -416,10 +416,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use wiab_core::{
+        meeting::{MeetingRepository, MinutesAgendaItem, MinutesDocument, ParticipantKind},
         meeting_traits::{
             Clock, FloorRequestCandidate, MeetingIntelligence, SpeechClip, SpeechSynthesisError,
         },
-        meeting::{MeetingRepository, MinutesAgendaItem, MinutesDocument, ParticipantKind},
     };
 
     #[derive(Default, Clone)]

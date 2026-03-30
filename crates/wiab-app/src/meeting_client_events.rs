@@ -1,4 +1,4 @@
-use wiab_core::{meeting_traits::SpeechClip, meeting::MinutesDocument};
+use wiab_core::{meeting::MinutesDocument, meeting_traits::SpeechClip};
 
 #[derive(Debug, Clone)]
 pub enum MeetingClientEvent {
