@@ -4,7 +4,7 @@
 
 Before working on domain modeling or backend architecture, read:
 - `../docs/DDD.md` — Domain-Driven Design reference. Defines the patterns, naming conventions, and architectural principles used in this codebase.
-- `../docs/planning/AGENT_MODEL.md` — Agent execution pipeline domain model.
+- `../docs/AGENT_MODEL.md` — Agent execution pipeline domain model.
 
 ## Architecture
 
