@@ -3,14 +3,14 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::info;
-use wiab_app::MeetingApplicationService;
+use wiab_app::{MeetingApplicationService, WorkApplicationService};
 use wiab_core::{
     meeting_traits::{Clock, MeetingIntelligence},
     transcript::FinalizedTranscript,
 };
 use wiab_inf::{
     AppState, DefaultSpeechSynthesizer, HeuristicMeetingIntelligence, InMemoryMeetingRepository,
-    LlamaMeetingIntelligence, Sfu, SystemClock,
+    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, Sfu, SystemClock,
 };
 
 pub async fn build_app_state() -> anyhow::Result<AppState> {
@@ -26,6 +26,11 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
 
     log_loaded_meetings(meeting_service.as_ref());
 
+    let work_service = Arc::new(WorkApplicationService::new(
+        InMemoryWorkRepository::new(),
+        Arc::new(InMemoryWorkNumbering::new()),
+    ));
+
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<FinalizedTranscript>();
     let sfu = Arc::new(
         Sfu::new(meeting_service.clone(), transcript_tx)
@@ -36,6 +41,7 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
 
     Ok(AppState {
         meeting_service,
+        work_service,
         sfu,
     })
 }
