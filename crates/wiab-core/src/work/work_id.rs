@@ -48,6 +48,11 @@ mod tests {
     }
 
     #[test]
+    fn exposes_number() {
+        assert_eq!(WorkId::from_number(9).number(), 9);
+    }
+
+    #[test]
     fn parses_valid_id() {
         assert_eq!("W-42".parse::<WorkId>().unwrap(), WorkId::from_number(42));
     }

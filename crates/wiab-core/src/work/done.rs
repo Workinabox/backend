@@ -70,4 +70,15 @@ mod tests {
         done.unfulfill();
         assert!(!done.is_fulfilled());
     }
+
+    #[test]
+    fn exposes_accessors_and_view() {
+        let mut done = Done::new("ship it".to_owned()).unwrap();
+        assert_eq!(done.criterion(), "ship it");
+        done.fulfill();
+        let view = done.view();
+        assert_eq!(view.id, done.id().to_string());
+        assert_eq!(view.criterion, "ship it");
+        assert!(view.fulfilled);
+    }
 }

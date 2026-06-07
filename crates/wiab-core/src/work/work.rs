@@ -204,6 +204,34 @@ mod tests {
     }
 
     #[test]
+    fn exposes_getters() {
+        let mut root =
+            Work::new(WorkId::from_number(1), "Epic".to_owned(), "desc".to_owned()).unwrap();
+        assert_eq!(root.id(), WorkId::from_number(1));
+        assert_eq!(root.title(), "Epic");
+        assert_eq!(root.description(), "desc");
+        assert!(root.dones().is_empty());
+        root.add_child(work(2, "Child")).unwrap();
+        assert_eq!(root.children().len(), 1);
+    }
+
+    #[test]
+    fn unfulfill_done_reverts_completion() {
+        let mut root = work(1, "Ship");
+        let done = root.add_done("tests pass".to_owned()).unwrap();
+        root.fulfill_done(&done).unwrap();
+        assert!(root.is_done());
+        root.unfulfill_done(&done).unwrap();
+        assert!(!root.is_done());
+    }
+
+    #[test]
+    fn find_mut_returns_none_for_missing() {
+        let mut root = work(1, "Ship");
+        assert!(root.find_mut(&WorkId::from_number(42)).is_none());
+    }
+
+    #[test]
     fn snapshot_mirrors_tree_with_completion() {
         let mut parent = work(1, "Epic");
         let parent_done = parent.add_done("review".to_owned()).unwrap();

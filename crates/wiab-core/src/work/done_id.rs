@@ -31,3 +31,22 @@ impl FromStr for DoneId {
             .map_err(|_| WorkError::InvalidDoneId(value.to_owned()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_through_string() {
+        let id = DoneId::new();
+        assert_eq!(id.to_string().parse::<DoneId>().unwrap(), id);
+    }
+
+    #[test]
+    fn rejects_malformed_id() {
+        assert_eq!(
+            "not-a-uuid".parse::<DoneId>().unwrap_err(),
+            WorkError::InvalidDoneId("not-a-uuid".to_owned())
+        );
+    }
+}
