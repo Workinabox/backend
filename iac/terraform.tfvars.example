@@ -1,0 +1,31 @@
+# Copy to terraform.tfvars and fill in. Do NOT commit terraform.tfvars.
+
+# --- Xen Orchestra ---
+xoa_url      = "wss://xoa.lan"
+xoa_token    = "your-xo-api-token"
+xoa_insecure = "false" # "true" if XOA uses a self-signed cert
+
+# --- Pool inventory (must match names in your XO) ---
+template_name      = "Ubuntu Server 24.04 (cloud-init)"
+network_name       = "Pool-wide network associated with eth0"
+storage_repository = "Local storage"
+
+# --- VM sizing (defaults: 4 vCPU / 8 GB / 40 GB) ---
+hostname  = "workinabox"
+vcpus     = 4
+memory_gb = 8
+disk_gb   = 40
+
+# --- Networking (static LAN IP, outside DHCP pool) ---
+host_ip            = "192.168.1.50"
+cidr_prefix        = 24
+gateway            = "192.168.1.1"
+dns_servers        = ["1.1.1.1", "9.9.9.9"]
+ssh_authorized_key = "ssh-ed25519 AAAA... you@host"
+
+# --- Application ---
+domain            = "workinabox.gos.dk"
+letsencrypt_email = "frederic.gos@gmail.com"
+# Public WAN IP if WebRTC clients are on the internet (served via NAT),
+# otherwise the LAN host_ip for LAN-only use.
+announced_address = "203.0.113.10"
