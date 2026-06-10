@@ -91,9 +91,16 @@ jobs:
 
       - name: Package binary
         run: |
+          set -euo pipefail
           cd target/release
-          tar czf wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.tar.gz wiab
-          sha256sum wiab > wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
+          # The wiab binary dynamically links libllama/libggml (built by llama-cpp-sys);
+          # bundle those .so files so the host doesn't need to build them.
+          mkdir -p pkg/lib
+          cp wiab pkg/
+          libdir="$(dirname "$(find "$PWD/build" -path '*llama-cpp-sys-2-*/out/lib/libllama.so' | head -1)")"
+          cp -P "$libdir"/libllama.so* "$libdir"/libggml*.so* pkg/lib/
+          tar czf wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.tar.gz -C pkg wiab lib
+          sha256sum pkg/wiab | sed 's# .*# wiab#' > wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

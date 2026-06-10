@@ -19,7 +19,7 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl jq tar coreutils ufw \
   nginx certbot python3-certbot-nginx \
   qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils cpu-checker \
-  libssl3
+  libssl3 libopus0
 update-ca-certificates || true
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,12 @@ if [ -n "$b_sha" ] && [ "$b_sha" != "null" ]; then
   log "backend sha256 verified"
 fi
 install -m 0755 /tmp/wiab-backend/wiab /usr/local/bin/wiab
+# Shared libraries built by native deps (libllama/libggml), bundled in the release
+if ls /tmp/wiab-backend/lib/*.so* >/dev/null 2>&1; then
+  cp -P /tmp/wiab-backend/lib/*.so* /usr/local/lib/
+  ldconfig
+  log "installed bundled shared libraries"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Backend env + systemd service
