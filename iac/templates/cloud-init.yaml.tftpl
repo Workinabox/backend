@@ -1,0 +1,32 @@
+#cloud-config
+hostname: ${hostname}
+fqdn: ${fqdn}
+preserve_hostname: false
+
+users:
+  - default
+  - name: ubuntu
+    sudo: 'ALL=(ALL) NOPASSWD:ALL'
+    groups: [sudo, kvm, libvirt]
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_authorized_key}
+
+write_files:
+  - path: /etc/wiab/provision.env
+    permissions: '0640'
+    content: |
+      WIAB_DOMAIN=${domain}
+      WIAB_LETSENCRYPT_EMAIL=${letsencrypt_email}
+      WIAB_ANNOUNCED_ADDRESS=${announced_address}
+      WIAB_BACKEND_REPO=${backend_repo}
+      WIAB_FRONTEND_REPO=${frontend_repo}
+      WIAB_FC_KERNEL_URL=${fc_kernel_url}
+      WIAB_FC_ROOTFS_URL=${fc_rootfs_url}
+  - path: /opt/wiab/provision.sh
+    permissions: '0755'
+    encoding: b64
+    content: ${provision_b64}
+
+runcmd:
+  - [bash, -lc, "/opt/wiab/provision.sh 2>&1 | tee /var/log/wiab-provision.log"]

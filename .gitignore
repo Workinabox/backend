@@ -24,3 +24,10 @@ target
 # Added by cargo
 
 /target
+
+# Terraform — local state and secret-bearing variables (iac/)
+iac/terraform.tfvars
+iac/*.tfstate
+iac/*.tfstate.*
+iac/.terraform/
+# Note: .terraform.lock.hcl is intentionally NOT ignored — commit it to pin provider versions.
