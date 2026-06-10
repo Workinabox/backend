@@ -83,6 +83,9 @@ jobs:
       - name: Install Python invoke (preflight)
         run: python3 -m pip install --upgrade --target /tmp/pip-invoke invoke
 
+      - name: Install rustfmt component
+        run: rustup component add rustfmt
+
       - name: Build release
         run: cargo build --release
 
