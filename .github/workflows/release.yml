@@ -64,6 +64,8 @@ jobs:
       image: rust:1.92-bookworm
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      # Compiled into the binary so /health reports the release tag, not Cargo.toml.
+      WIAB_VERSION: ${{ needs.create-release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
