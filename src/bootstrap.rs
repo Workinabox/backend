@@ -43,7 +43,9 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
         meeting_service,
         work_service,
         sfu,
-        version: env!("CARGO_PKG_VERSION"),
+        // Release builds inject WIAB_VERSION (the git tag) so the reported
+        // version matches the release; local builds fall back to Cargo.toml.
+        version: option_env!("WIAB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
     })
 }
 
