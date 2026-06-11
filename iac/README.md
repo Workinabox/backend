@@ -39,6 +39,34 @@ terraform apply
 
 Watch in-guest progress: `ssh ubuntu@<host_ip>` then
 `tail -f /var/log/wiab-provision.log` (or `/var/log/cloud-init-output.log`).
+Note `… | tee` buffers, so the log can lag — `cloud-init status --wait` is a
+truer "is it done" signal.
+
+## Updating backend/frontend (no host rebuild)
+
+The host carries a `/usr/local/bin/wiab-deploy` script that pulls a release,
+swaps the binary+libs / static bundle, restarts the backend (with a `/health`
+check and **auto-rollback** to the previous build on failure), and atomically
+repoints the frontend. cloud-init and Terraform both drive it.
+
+To ship a new version **in place** (no VM recreation, no cert re-issue):
+
+```sh
+# pin the new tag(s) in terraform.tfvars
+backend_version  = "v0.2.0"     # and/or frontend_version
+terraform apply                 # only null_resource.deploy_app runs; VM untouched
+```
+
+`terraform plan` after a bump should show **only** `null_resource.deploy_app`
+being replaced — never `xenorchestra_vm.host`. Updates take seconds.
+
+Notes:
+- Pin **explicit tags** to drive updates. A constant `"latest"` never changes the
+  trigger, so to re-pull `latest` use `terraform apply -replace=null_resource.deploy_app`.
+- Rollback = set the version back to the older tag and `apply` (it re-downloads),
+  or on the host `wiab-deploy --backend <oldtag>`.
+- Deployed versions are recorded in `/etc/wiab/versions`; re-deploying the same
+  tag is a no-op.
 
 ## Notes / caveats
 

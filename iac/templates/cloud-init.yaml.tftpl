@@ -21,12 +21,18 @@ write_files:
       WIAB_ANNOUNCED_ADDRESS=${announced_address}
       WIAB_BACKEND_REPO=${backend_repo}
       WIAB_FRONTEND_REPO=${frontend_repo}
+      WIAB_BACKEND_VERSION=${backend_version}
+      WIAB_FRONTEND_VERSION=${frontend_version}
       WIAB_FC_KERNEL_URL=${fc_kernel_url}
       WIAB_FC_ROOTFS_URL=${fc_rootfs_url}
   - path: /opt/wiab/provision.sh
     permissions: '0755'
     encoding: b64
     content: ${provision_b64}
+  - path: /usr/local/bin/wiab-deploy
+    permissions: '0755'
+    encoding: b64
+    content: ${wiab_deploy_b64}
 
 runcmd:
   - [bash, -lc, "/opt/wiab/provision.sh 2>&1 | tee /var/log/wiab-provision.log"]

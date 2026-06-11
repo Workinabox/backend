@@ -126,6 +126,24 @@ variable "frontend_repo" {
   default     = "Workinabox/frontend"
 }
 
+variable "backend_version" {
+  type        = string
+  description = "Backend release to deploy: a tag like v0.2.0, or \"latest\". Bump + apply to update in place (no VM rebuild)."
+  default     = "latest"
+}
+
+variable "frontend_version" {
+  type        = string
+  description = "Frontend release to deploy: a tag like v0.2.0, or \"latest\". Bump + apply to update in place (no VM rebuild)."
+  default     = "latest"
+}
+
+variable "ssh_private_key_path" {
+  type        = string
+  description = "Path to the private key matching ssh_authorized_key, used for the in-place deploy over SSH"
+  default     = "~/.ssh/id_rsa"
+}
+
 # ---------------------------------------------------------------------------
 # Firecracker smoke-test artifacts (bump as upstream rotates them)
 # ---------------------------------------------------------------------------
