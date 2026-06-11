@@ -31,8 +31,17 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> &'static str {
-    "ok"
+#[derive(serde::Serialize)]
+struct Health {
+    status: &'static str,
+    version: &'static str,
+}
+
+async fn health(State(state): State<AppState>) -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        version: state.version,
+    })
 }
 
 async fn list_meetings(State(state): State<AppState>) -> Json<Vec<MeetingSnapshot>> {

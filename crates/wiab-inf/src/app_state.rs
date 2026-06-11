@@ -9,4 +9,6 @@ pub struct AppState {
     pub meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
     pub work_service: Arc<WorkApplicationService<InMemoryWorkRepository>>,
     pub sfu: Arc<Sfu>,
+    /// Version of the running backend, reported by `/health`.
+    pub version: &'static str,
 }
