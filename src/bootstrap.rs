@@ -43,6 +43,7 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
         meeting_service,
         work_service,
         sfu,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 
