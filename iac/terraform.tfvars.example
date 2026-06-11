@@ -29,3 +29,13 @@ letsencrypt_email = "frederic.gos@gmail.com"
 # Public WAN IP if WebRTC clients are on the internet (served via NAT),
 # otherwise the LAN host_ip for LAN-only use.
 announced_address = "203.0.113.10"
+
+# --- App versions (in-place updates) ---
+# Pin a tag (e.g. "v0.2.0") and `terraform apply` to deploy it without rebuilding
+# the VM. "latest" is fine for the first build; to drive updates, pin explicit
+# tags so the change is detected (or use `apply -replace=null_resource.deploy_app`).
+backend_version  = "latest"
+frontend_version = "latest"
+
+# Private key matching ssh_authorized_key, used for the in-place deploy over SSH.
+ssh_private_key_path = "~/.ssh/id_rsa"

@@ -11,20 +11,24 @@ data "xenorchestra_sr" "sr" {
 }
 
 locals {
-  provision_b64 = base64encode(file("${path.module}/scripts/provision.sh"))
-  dns_csv       = join(", ", var.dns_servers)
-  mem_bytes     = var.memory_gb * 1024 * 1024 * 1024
+  provision_b64   = base64encode(file("${path.module}/scripts/provision.sh"))
+  wiab_deploy_b64 = base64encode(file("${path.module}/scripts/wiab-deploy.sh"))
+  dns_csv         = join(", ", var.dns_servers)
+  mem_bytes       = var.memory_gb * 1024 * 1024 * 1024
 
   cloud_config = templatefile("${path.module}/templates/cloud-init.yaml.tftpl", {
     hostname           = var.hostname
     fqdn               = var.domain
     ssh_authorized_key = var.ssh_authorized_key
     provision_b64      = local.provision_b64
+    wiab_deploy_b64    = local.wiab_deploy_b64
     domain             = var.domain
     letsencrypt_email  = var.letsencrypt_email
     announced_address  = var.announced_address
     backend_repo       = var.backend_repo
     frontend_repo      = var.frontend_repo
+    backend_version    = var.backend_version
+    frontend_version   = var.frontend_version
     fc_kernel_url      = var.fc_test_kernel_url
     fc_rootfs_url      = var.fc_test_rootfs_url
   })
@@ -85,5 +89,32 @@ resource "null_resource" "enable_nested_virt" {
 
   provisioner "local-exec" {
     command = "xo-cli vm.set id=${self.triggers.vm_id} memoryMin=${self.triggers.mem} memoryMax=${self.triggers.mem} memoryStaticMax=${self.triggers.mem} nestedVirt=true && xo-cli vm.start id=${self.triggers.vm_id}"
+  }
+}
+
+# Deploys the pinned backend/frontend versions over SSH. Re-runs whenever a
+# version variable changes (bump backend_version / frontend_version and apply)
+# WITHOUT recreating the VM. On first apply it waits for cloud-init to finish,
+# then no-ops because wiab-deploy is idempotent (the version is already deployed).
+resource "null_resource" "deploy_app" {
+  depends_on = [null_resource.enable_nested_virt]
+
+  triggers = {
+    backend_version  = var.backend_version
+    frontend_version = var.frontend_version
+  }
+
+  connection {
+    host        = var.host_ip
+    user        = "ubuntu"
+    private_key = file(pathexpand(var.ssh_private_key_path))
+    timeout     = "10m"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "cloud-init status --wait || true",
+      "sudo wiab-deploy --backend ${var.backend_version} --frontend ${var.frontend_version}",
+    ]
   }
 }

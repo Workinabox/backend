@@ -82,34 +82,7 @@ fi
 id wiab >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin wiab
 
 # ---------------------------------------------------------------------------
-# 4. Backend — latest GitHub release
-# ---------------------------------------------------------------------------
-log "downloading latest backend release from ${WIAB_BACKEND_REPO}"
-mkdir -p /tmp/wiab-backend
-b_api="https://api.github.com/repos/${WIAB_BACKEND_REPO}/releases/latest"
-b_json="$(curl -fsSL "$b_api")"
-b_tgz="$(echo "$b_json" | jq -r '.assets[] | select(.name|test("x86_64-linux-gnu\\.tar\\.gz$")) | .browser_download_url')"
-b_sha="$(echo "$b_json" | jq -r '.assets[] | select(.name|test("x86_64-linux-gnu\\.sha256$")) | .browser_download_url')"
-[ -n "$b_tgz" ] || { log "FATAL: no backend tar.gz asset in latest release"; exit 1; }
-curl -fsSL -o /tmp/wiab-backend/wiab.tar.gz "$b_tgz"
-tar -xzf /tmp/wiab-backend/wiab.tar.gz -C /tmp/wiab-backend
-if [ -n "$b_sha" ] && [ "$b_sha" != "null" ]; then
-  curl -fsSL -o /tmp/wiab-backend/wiab.sha256 "$b_sha"
-  exp="$(awk '{print $1}' /tmp/wiab-backend/wiab.sha256)"
-  got="$(sha256sum /tmp/wiab-backend/wiab | awk '{print $1}')"
-  [ "$exp" = "$got" ] || { log "FATAL: backend sha256 mismatch"; exit 1; }
-  log "backend sha256 verified"
-fi
-install -m 0755 /tmp/wiab-backend/wiab /usr/local/bin/wiab
-# Shared libraries built by native deps (libllama/libggml), bundled in the release
-if ls /tmp/wiab-backend/lib/*.so* >/dev/null 2>&1; then
-  cp -P /tmp/wiab-backend/lib/*.so* /usr/local/lib/
-  ldconfig
-  log "installed bundled shared libraries"
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Backend env + systemd service
+# 4. Backend env + systemd service (binary installed by wiab-deploy below)
 # ---------------------------------------------------------------------------
 mkdir -p /etc/wiab
 cat > /etc/wiab/wiab.env <<EOF
@@ -136,34 +109,15 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now wiab
+systemctl enable wiab   # started by wiab-deploy once the binary is installed
 
 # ---------------------------------------------------------------------------
-# 6. Frontend — latest GitHub release
+# 5. Frontend release dir (content installed by wiab-deploy below)
 # ---------------------------------------------------------------------------
-log "downloading latest frontend release from ${WIAB_FRONTEND_REPO}"
-mkdir -p /tmp/wiab-frontend
-f_api="https://api.github.com/repos/${WIAB_FRONTEND_REPO}/releases/latest"
-f_json="$(curl -fsSL "$f_api")"
-f_tgz="$(echo "$f_json" | jq -r '.assets[] | select(.name|test("dist\\.tar\\.gz$")) | .browser_download_url')"
-f_sha="$(echo "$f_json" | jq -r '.assets[] | select(.name|test("dist\\.tar\\.gz\\.sha256$")) | .browser_download_url')"
-[ -n "$f_tgz" ] || { log "FATAL: no frontend dist asset in latest release"; exit 1; }
-curl -fsSL -o /tmp/wiab-frontend/dist.tar.gz "$f_tgz"
-if [ -n "$f_sha" ] && [ "$f_sha" != "null" ]; then
-  curl -fsSL -o /tmp/wiab-frontend/dist.tar.gz.sha256 "$f_sha"
-  exp="$(awk '{print $1}' /tmp/wiab-frontend/dist.tar.gz.sha256)"
-  got="$(sha256sum /tmp/wiab-frontend/dist.tar.gz | awk '{print $1}')"
-  [ "$exp" = "$got" ] || { log "FATAL: frontend sha256 mismatch"; exit 1; }
-  log "frontend sha256 verified"
-fi
-tar -xzf /tmp/wiab-frontend/dist.tar.gz -C /tmp/wiab-frontend
-rm -rf /var/www/wiab
-mkdir -p /var/www/wiab
-cp -r /tmp/wiab-frontend/dist/* /var/www/wiab/
-chown -R www-data:www-data /var/www/wiab
+mkdir -p /var/www/wiab-releases
 
 # ---------------------------------------------------------------------------
-# 7. nginx — serve SPA, proxy /api to backend (prefix-stripped), WS upgrade
+# 6. nginx — serve SPA, proxy /api to backend (prefix-stripped), WS upgrade
 # ---------------------------------------------------------------------------
 cat > /etc/nginx/conf.d/wiab-upgrade.conf <<'EOF'
 map $http_upgrade $connection_upgrade {
@@ -204,6 +158,12 @@ ln -sf /etc/nginx/sites-available/wiab /etc/nginx/sites-enabled/wiab
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl reload nginx
+
+# ---------------------------------------------------------------------------
+# 7. Deploy backend + frontend at the pinned versions (installs binary/libs,
+#    starts wiab, populates /var/www/wiab). Same script used for later updates.
+# ---------------------------------------------------------------------------
+wiab-deploy --backend "${WIAB_BACKEND_VERSION}" --frontend "${WIAB_FRONTEND_VERSION}"
 
 # ---------------------------------------------------------------------------
 # 8. TLS via Let's Encrypt (non-fatal: needs public DNS + port 80 reachable)
