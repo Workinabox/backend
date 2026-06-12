@@ -7,6 +7,12 @@ pub struct CreateWorkRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct UpdateWorkRequest {
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AddDoneRequest {
     pub criterion: String,
 }
