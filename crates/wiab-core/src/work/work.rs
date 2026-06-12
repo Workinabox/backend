@@ -1,11 +1,13 @@
+use crate::project::ProjectId;
 use crate::work::{Done, DoneId, WorkError, WorkId, WorkSnapshot};
 
-/// A unit of work: a `W-###` id, a title, a description, a list of `Done`s (acceptance
-/// criteria), and child works. `Work` is both the aggregate root and a node in the
-/// composite tree — a leaf is simply a `Work` with no children.
+/// A unit of work: a `W-###` id, the project it belongs to, a title, a description, a
+/// list of `Done`s (acceptance criteria), and child works. `Work` is both the aggregate
+/// root and a node in the composite tree — a leaf is simply a `Work` with no children.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Work {
     id: WorkId,
+    project_id: ProjectId,
     title: String,
     description: String,
     dones: Vec<Done>,
@@ -13,12 +15,18 @@ pub struct Work {
 }
 
 impl Work {
-    pub fn new(id: WorkId, title: String, description: String) -> Result<Self, WorkError> {
+    pub fn new(
+        id: WorkId,
+        project_id: ProjectId,
+        title: String,
+        description: String,
+    ) -> Result<Self, WorkError> {
         if title.trim().is_empty() {
             return Err(WorkError::EmptyTitle);
         }
         Ok(Self {
             id,
+            project_id,
             title,
             description,
             dones: Vec::new(),
@@ -28,6 +36,10 @@ impl Work {
 
     pub fn id(&self) -> WorkId {
         self.id
+    }
+
+    pub fn project_id(&self) -> ProjectId {
+        self.project_id
     }
 
     pub fn title(&self) -> &str {
@@ -44,6 +56,15 @@ impl Work {
 
     pub fn children(&self) -> &[Work] {
         &self.children
+    }
+
+    pub fn update(&mut self, title: String, description: String) -> Result<(), WorkError> {
+        if title.trim().is_empty() {
+            return Err(WorkError::EmptyTitle);
+        }
+        self.title = title;
+        self.description = description;
+        Ok(())
     }
 
     pub fn add_done(&mut self, criterion: String) -> Result<DoneId, WorkError> {
@@ -98,6 +119,7 @@ impl Work {
     pub fn snapshot(&self) -> WorkSnapshot {
         WorkSnapshot {
             id: self.id.to_string(),
+            project_id: self.project_id.to_string(),
             title: self.title.clone(),
             description: self.description.clone(),
             dones: self.dones.iter().map(Done::view).collect(),
@@ -119,13 +141,45 @@ mod tests {
     use super::*;
 
     fn work(number: u64, title: &str) -> Work {
-        Work::new(WorkId::from_number(number), title.to_owned(), String::new()).unwrap()
+        Work::new(
+            WorkId::from_number(number),
+            ProjectId::from_number(1),
+            title.to_owned(),
+            String::new(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn rejects_empty_title() {
-        let error = Work::new(WorkId::from_number(1), "  ".to_owned(), String::new()).unwrap_err();
+        let error = Work::new(
+            WorkId::from_number(1),
+            ProjectId::from_number(1),
+            "  ".to_owned(),
+            String::new(),
+        )
+        .unwrap_err();
         assert_eq!(error, WorkError::EmptyTitle);
+    }
+
+    #[test]
+    fn update_replaces_title_and_description() {
+        let mut work = work(1, "Ship v1");
+        work.update("Ship v2".to_owned(), "the sequel".to_owned())
+            .unwrap();
+        assert_eq!(work.title(), "Ship v2");
+        assert_eq!(work.description(), "the sequel");
+    }
+
+    #[test]
+    fn update_rejects_empty_title() {
+        let mut work = work(1, "Ship v1");
+        let error = work
+            .update("  ".to_owned(), "the sequel".to_owned())
+            .unwrap_err();
+        assert_eq!(error, WorkError::EmptyTitle);
+        assert_eq!(work.title(), "Ship v1");
+        assert_eq!(work.description(), "");
     }
 
     #[test]
@@ -205,9 +259,15 @@ mod tests {
 
     #[test]
     fn exposes_getters() {
-        let mut root =
-            Work::new(WorkId::from_number(1), "Epic".to_owned(), "desc".to_owned()).unwrap();
+        let mut root = Work::new(
+            WorkId::from_number(1),
+            ProjectId::from_number(2),
+            "Epic".to_owned(),
+            "desc".to_owned(),
+        )
+        .unwrap();
         assert_eq!(root.id(), WorkId::from_number(1));
+        assert_eq!(root.project_id(), ProjectId::from_number(2));
         assert_eq!(root.title(), "Epic");
         assert_eq!(root.description(), "desc");
         assert!(root.dones().is_empty());
@@ -246,5 +306,17 @@ mod tests {
 
         parent.fulfill_done(&parent_done).unwrap();
         assert!(parent.snapshot().is_done);
+    }
+
+    #[test]
+    fn snapshot_includes_project_id() {
+        let work = Work::new(
+            WorkId::from_number(1),
+            ProjectId::from_number(7),
+            "Ship".to_owned(),
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(work.snapshot().project_id, "P-7");
     }
 }

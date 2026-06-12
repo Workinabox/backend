@@ -7,6 +7,7 @@ use crate::work::DoneView;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkSnapshot {
     pub id: String,
+    pub project_id: String,
     pub title: String,
     pub description: String,
     pub dones: Vec<DoneView>,

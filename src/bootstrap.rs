@@ -3,13 +3,22 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::info;
-use wiab_app::{MeetingApplicationService, WorkApplicationService};
+use wiab_app::{
+    AgentApplicationService, BoardApplicationService, CreateOrganizationRequest,
+    CreateProjectRequest, MeetingApplicationService, OrganizationApplicationService,
+    PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
+    WorkApplicationService,
+};
 use wiab_core::{
     meeting_traits::{Clock, MeetingIntelligence},
     transcript::FinalizedTranscript,
 };
 use wiab_inf::{
-    AppState, DefaultSpeechSynthesizer, HeuristicMeetingIntelligence, InMemoryMeetingRepository,
+    AppState, DefaultSpeechSynthesizer, HeuristicMeetingIntelligence, InMemoryAgentNumbering,
+    InMemoryAgentRepository, InMemoryBoardNumbering, InMemoryBoardRepository,
+    InMemoryMeetingRepository, InMemoryOrganizationNumbering, InMemoryOrganizationRepository,
+    InMemoryPipelineNumbering, InMemoryPipelineRepository, InMemoryProjectNumbering,
+    InMemoryProjectRepository, InMemoryRepoNumbering, InMemoryRepoRepository,
     InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, Sfu, SystemClock,
 };
 
@@ -26,8 +35,52 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
 
     log_loaded_meetings(meeting_service.as_ref());
 
+    let organization_repository = InMemoryOrganizationRepository::new();
+    let organization_service = Arc::new(OrganizationApplicationService::new(
+        organization_repository.clone(),
+        Arc::new(InMemoryOrganizationNumbering::new()),
+    ));
+
+    let project_repository = InMemoryProjectRepository::new();
+    let project_service = Arc::new(ProjectApplicationService::new(
+        project_repository.clone(),
+        organization_repository.clone(),
+        Arc::new(InMemoryProjectNumbering::new()),
+    ));
+
+    seed_default_organization(organization_service.as_ref(), project_service.as_ref())?;
+
+    let agent_repository = InMemoryAgentRepository::new();
+    let agent_service = Arc::new(AgentApplicationService::new(
+        agent_repository,
+        organization_repository.clone(),
+        Arc::new(InMemoryAgentNumbering::new()),
+    ));
+
+    let board_repository = InMemoryBoardRepository::new();
+    let board_service = Arc::new(BoardApplicationService::new(
+        board_repository,
+        project_repository.clone(),
+        Arc::new(InMemoryBoardNumbering::new()),
+    ));
+
+    let repo_repository = InMemoryRepoRepository::new();
+    let repo_service = Arc::new(RepoApplicationService::new(
+        repo_repository,
+        project_repository.clone(),
+        Arc::new(InMemoryRepoNumbering::new()),
+    ));
+
+    let pipeline_repository = InMemoryPipelineRepository::new();
+    let pipeline_service = Arc::new(PipelineApplicationService::new(
+        pipeline_repository,
+        project_repository.clone(),
+        Arc::new(InMemoryPipelineNumbering::new()),
+    ));
+
     let work_service = Arc::new(WorkApplicationService::new(
         InMemoryWorkRepository::new(),
+        project_repository.clone(),
         Arc::new(InMemoryWorkNumbering::new()),
     ));
 
@@ -41,12 +94,48 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
 
     Ok(AppState {
         meeting_service,
+        organization_service,
+        project_service,
+        agent_service,
+        board_service,
+        repo_service,
+        pipeline_service,
         work_service,
         sfu,
         // Release builds inject WIAB_VERSION (the git tag) so the reported
         // version matches the release; local builds fall back to Cargo.toml.
         version: option_env!("WIAB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
     })
+}
+
+fn seed_default_organization(
+    organization_service: &OrganizationApplicationService<InMemoryOrganizationRepository>,
+    project_service: &ProjectApplicationService<
+        InMemoryProjectRepository,
+        InMemoryOrganizationRepository,
+    >,
+) -> anyhow::Result<()> {
+    let organization = organization_service
+        .create_organization(CreateOrganizationRequest {
+            name: "Gos & co".to_owned(),
+            description: String::new(),
+        })
+        .context("failed to seed default organization")?;
+    let project = project_service
+        .create_project(
+            &organization.id,
+            CreateProjectRequest {
+                name: "Workinabox".to_owned(),
+                description: String::new(),
+            },
+        )
+        .context("failed to seed default project")?
+        .expect("seed organization exists");
+    info!(
+        "seeded organization '{}' with project '{}'",
+        organization.id, project.id
+    );
+    Ok(())
 }
 
 fn log_loaded_meetings(meeting_service: &MeetingApplicationService<InMemoryMeetingRepository>) {
