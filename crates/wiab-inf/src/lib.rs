@@ -27,6 +27,17 @@ pub mod in_memory_work_numbering;
 pub mod in_memory_work_repository;
 pub mod llama_meeting_intelligence;
 pub mod llama_runtime;
+pub mod pg_pool;
+pub mod postgres_agent_repository;
+pub mod postgres_board_repository;
+pub mod postgres_organization_repository;
+pub mod postgres_pipeline_repository;
+pub mod postgres_project_repository;
+pub mod postgres_repo_repository;
+pub mod postgres_role_assignment_repository;
+pub mod postgres_user_repository;
+pub mod postgres_work_repository;
+pub mod repository_dispatch;
 pub mod sfu;
 pub mod speech_synthesizer;
 pub mod system_clock;
@@ -58,6 +69,19 @@ pub use in_memory_user_repository::InMemoryUserRepository;
 pub use in_memory_work_numbering::InMemoryWorkNumbering;
 pub use in_memory_work_repository::InMemoryWorkRepository;
 pub use llama_meeting_intelligence::LlamaMeetingIntelligence;
+pub use postgres_agent_repository::PostgresAgentRepository;
+pub use postgres_board_repository::PostgresBoardRepository;
+pub use postgres_organization_repository::PostgresOrganizationRepository;
+pub use postgres_pipeline_repository::PostgresPipelineRepository;
+pub use postgres_project_repository::PostgresProjectRepository;
+pub use postgres_repo_repository::PostgresRepoRepository;
+pub use postgres_role_assignment_repository::PostgresRoleAssignmentRepository;
+pub use postgres_user_repository::PostgresUserRepository;
+pub use postgres_work_repository::PostgresWorkRepository;
+pub use repository_dispatch::{
+    AgentRepo, BoardRepo, OrganizationRepo, PipelineRepo, ProjectRepo, RepoRepo,
+    RoleAssignmentRepo, UserRepo, WorkRepo,
+};
 pub use sfu::{Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;
 pub use system_clock::SystemClock;

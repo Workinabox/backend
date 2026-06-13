@@ -1,3 +1,4 @@
+use anyhow::Result;
 use wiab_core::access::{Operation, Role, RoleAssignmentRepository, Scope, effective_role};
 use wiab_core::organization::OrganizationId;
 use wiab_core::project::{ProjectId, ProjectRepository};
@@ -28,55 +29,74 @@ impl<A: RoleAssignmentRepository, R: RepoRepository, P: ProjectRepository>
         }
     }
 
-    fn repo_chain(&self, repo: RepoId) -> Option<(OrganizationId, ProjectId, RepoId)> {
-        let repo = self.repo_repository.get(&repo)?;
-        let project = self.project_repository.get(&repo.project_id())?;
-        Some((project.organization_id(), repo.project_id(), repo.id()))
+    async fn repo_chain(
+        &self,
+        repo: RepoId,
+    ) -> Result<Option<(OrganizationId, ProjectId, RepoId)>> {
+        let Some((repo, _)) = self.repo_repository.get(&repo).await? else {
+            return Ok(None);
+        };
+        let Some((project, _)) = self.project_repository.get(&repo.project_id()).await? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            project.organization_id(),
+            repo.project_id(),
+            repo.id(),
+        )))
     }
 
     /// Whether `user` may perform `operation` at the organization level (e.g. creating a
     /// repo). Considers only Org-scoped grants for that org.
-    pub fn authorize_org(&self, user: UserId, org: OrganizationId, operation: Operation) -> bool {
+    pub async fn authorize_org(
+        &self,
+        user: UserId,
+        org: OrganizationId,
+        operation: Operation,
+    ) -> Result<bool> {
         let role = self
             .assignment_repository
             .list()
+            .await?
             .into_iter()
             .filter(|assignment| {
                 assignment.user_id() == user && assignment.scope() == Scope::Org(org)
             })
             .map(|assignment| assignment.role())
             .max();
-        role.is_some_and(|role| role.allows(operation))
+        Ok(role.is_some_and(|role| role.allows(operation)))
     }
 
     /// The user's effective role on the repo (ignoring any token scope), or `None`.
-    pub fn effective_role(&self, user: UserId, repo: RepoId) -> Option<Role> {
-        let (org, project, repo) = self.repo_chain(repo)?;
-        let assignments = self.assignment_repository.list();
-        effective_role(&assignments, user, org, project, repo)
+    pub async fn effective_role(&self, user: UserId, repo: RepoId) -> Result<Option<Role>> {
+        let Some((org, project, repo)) = self.repo_chain(repo).await? else {
+            return Ok(None);
+        };
+        let assignments = self.assignment_repository.list().await?;
+        Ok(effective_role(&assignments, user, org, project, repo))
     }
 
     /// Whether `user` may perform `operation` on `repo`. `token_scope` is `Some` when the
     /// request authenticated with an access token (HTTPS) and `None` for SSH key auth.
-    pub fn authorize(
+    pub async fn authorize(
         &self,
         user: UserId,
         repo: RepoId,
         operation: Operation,
         token_scope: Option<&TokenScope>,
-    ) -> bool {
-        let Some((org, project, repo_id)) = self.repo_chain(repo) else {
-            return false;
+    ) -> Result<bool> {
+        let Some((org, project, repo_id)) = self.repo_chain(repo).await? else {
+            return Ok(false);
         };
-        let assignments = self.assignment_repository.list();
+        let assignments = self.assignment_repository.list().await?;
         let Some(base) = effective_role(&assignments, user, org, project, repo_id) else {
-            return false;
+            return Ok(false);
         };
         let role = match token_scope {
             None => base,
             Some(scope) => {
                 if !scope.allows_repo(repo_id) || !scope.allows_org(org) {
-                    return false;
+                    return Ok(false);
                 }
                 if scope.is_read_only() {
                     base.min(Role::Read)
@@ -85,6 +105,6 @@ impl<A: RoleAssignmentRepository, R: RepoRepository, P: ProjectRepository>
                 }
             }
         };
-        role.allows(operation)
+        Ok(role.allows(operation))
     }
 }

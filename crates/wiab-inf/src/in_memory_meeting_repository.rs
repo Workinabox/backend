@@ -6,10 +6,11 @@ use std::{
 use wiab_core::meeting::{
     AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, ParticipantKind,
 };
+use wiab_core::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryMeetingRepository {
-    meetings: Arc<RwLock<HashMap<String, Meeting>>>,
+    meetings: Arc<RwLock<HashMap<String, (Meeting, u64)>>>,
 }
 
 impl InMemoryMeetingRepository {
@@ -20,7 +21,9 @@ impl InMemoryMeetingRepository {
     pub fn with_seed_data(now: impl Fn() -> String) -> Self {
         let repository = Self::new();
 
-        repository.save(seeded_meeting(
+        // Seed at construction time (no concurrency): insert the meeting directly at
+        // version 1 rather than going through the async `save`.
+        let meeting = seeded_meeting(
             "Angela Meeting",
             "Frederic",
             &[SeedParticipant::agent(
@@ -30,35 +33,52 @@ impl InMemoryMeetingRepository {
             )],
             &["decide the most important next step"],
             &now,
-        ));
+        );
+        repository
+            .meetings
+            .write()
+            .expect("meeting repository write lock poisoned")
+            .insert(meeting.meeting_id.clone(), (meeting, 1));
 
         repository
     }
 }
 
 impl MeetingRepository for InMemoryMeetingRepository {
-    fn save(&self, meeting: Meeting) {
-        self.meetings
+    async fn save(&self, meeting: Meeting, expected: Version) -> Result<Version, SaveError> {
+        let mut meetings = self
+            .meetings
             .write()
-            .expect("meeting repository write lock poisoned")
-            .insert(meeting.meeting_id.clone(), meeting);
+            .expect("meeting repository write lock poisoned");
+        let current = meetings
+            .get(&meeting.meeting_id)
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        meetings.insert(meeting.meeting_id.clone(), (meeting, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, meeting_id: &str) -> Option<Meeting> {
-        self.meetings
+    async fn get(&self, meeting_id: &str) -> Result<Option<(Meeting, Version)>, RepoError> {
+        Ok(self
+            .meetings
             .read()
             .expect("meeting repository read lock poisoned")
             .get(meeting_id)
-            .cloned()
+            .map(|(meeting, version)| (meeting.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<Meeting> {
-        self.meetings
+    async fn list(&self) -> Result<Vec<Meeting>, RepoError> {
+        Ok(self
+            .meetings
             .read()
             .expect("meeting repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(meeting, _)| meeting.clone())
+            .collect())
     }
 }
 

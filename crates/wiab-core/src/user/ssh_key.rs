@@ -33,6 +33,21 @@ impl SshKey {
         })
     }
 
+    /// Reconstitute an SSH key from persisted state (used by repository implementations).
+    pub fn from_persistence(
+        id: SshKeyId,
+        label: String,
+        openssh_public_key: String,
+        fingerprint: String,
+    ) -> SshKey {
+        Self {
+            id,
+            label,
+            openssh_public_key,
+            fingerprint,
+        }
+    }
+
     pub fn id(&self) -> SshKeyId {
         self.id
     }

@@ -3,11 +3,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::work::{Work, WorkId, WorkRepository};
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryWorkRepository {
-    works: Arc<RwLock<HashMap<WorkId, Work>>>,
+    works: Arc<RwLock<HashMap<WorkId, (Work, u64)>>>,
 }
 
 impl InMemoryWorkRepository {
@@ -17,27 +18,39 @@ impl InMemoryWorkRepository {
 }
 
 impl WorkRepository for InMemoryWorkRepository {
-    fn save(&self, work: Work) {
-        self.works
+    async fn save(&self, work: Work, expected: Version) -> Result<Version, SaveError> {
+        let mut works = self
+            .works
             .write()
-            .expect("work repository write lock poisoned")
-            .insert(work.id(), work);
+            .expect("work repository write lock poisoned");
+        let current = works
+            .get(&work.id())
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        works.insert(work.id(), (work, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, id: &WorkId) -> Option<Work> {
-        self.works
+    async fn get(&self, id: &WorkId) -> Result<Option<(Work, Version)>, RepoError> {
+        Ok(self
+            .works
             .read()
             .expect("work repository read lock poisoned")
             .get(id)
-            .cloned()
+            .map(|(work, version)| (work.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<Work> {
-        self.works
+    async fn list(&self) -> Result<Vec<Work>, RepoError> {
+        Ok(self
+            .works
             .read()
             .expect("work repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(work, _)| work.clone())
+            .collect())
     }
 }

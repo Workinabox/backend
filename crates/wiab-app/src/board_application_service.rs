@@ -1,20 +1,19 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use anyhow::anyhow;
 use wiab_core::board::{Board, BoardId, BoardNumbering, BoardRepository, BoardSnapshot};
 use wiab_core::project::{ProjectId, ProjectRepository};
+use wiab_core::repository::{SaveError, Version};
 
 use crate::board_requests::{CreateBoardRequest, UpdateBoardRequest};
 
 /// Orchestrates use cases over the `Board` aggregate.
 ///
-/// Methods are synchronous: `Board` has no external/async collaborators, so a plain
-/// `std::sync::Mutex` guard held across each load-mutate-save is enough to prevent lost
-/// updates. Holds the project repository to verify the parent project exists.
+/// Holds the project repository to verify the parent project exists.
 pub struct BoardApplicationService<B: BoardRepository, P: ProjectRepository> {
     board_repository: B,
     project_repository: P,
     numbering: Arc<dyn BoardNumbering>,
-    mutation_guard: Mutex<()>,
 }
 
 impl<B: BoardRepository, P: ProjectRepository> BoardApplicationService<B, P> {
@@ -27,19 +26,22 @@ impl<B: BoardRepository, P: ProjectRepository> BoardApplicationService<B, P> {
             board_repository,
             project_repository,
             numbering,
-            mutation_guard: Mutex::new(()),
         }
     }
 
     /// Returns `Ok(None)` when no project with the given id exists.
-    pub fn list_boards(&self, project_id: &str) -> anyhow::Result<Option<Vec<BoardSnapshot>>> {
+    pub async fn list_boards(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Option<Vec<BoardSnapshot>>> {
         let id: ProjectId = project_id.parse()?;
-        if self.project_repository.get(&id).is_none() {
+        if self.project_repository.get(&id).await?.is_none() {
             return Ok(None);
         }
         let mut boards = self
             .board_repository
             .list()
+            .await?
             .into_iter()
             .filter(|board| board.project_id() == id)
             .collect::<Vec<_>>();
@@ -49,49 +51,50 @@ impl<B: BoardRepository, P: ProjectRepository> BoardApplicationService<B, P> {
         ))
     }
 
-    pub fn board_snapshot(&self, board_id: &str) -> anyhow::Result<Option<BoardSnapshot>> {
+    pub async fn board_snapshot(&self, board_id: &str) -> anyhow::Result<Option<BoardSnapshot>> {
         let id: BoardId = board_id.parse()?;
-        Ok(self.board_repository.get(&id).map(|board| board.snapshot()))
+        Ok(self
+            .board_repository
+            .get(&id)
+            .await?
+            .map(|(board, _)| board.snapshot()))
     }
 
     /// Returns `Ok(None)` when no project with the given id exists.
-    pub fn create_board(
+    pub async fn create_board(
         &self,
         project_id: &str,
         request: CreateBoardRequest,
     ) -> anyhow::Result<Option<BoardSnapshot>> {
-        let _guard = self.lock();
         let id: ProjectId = project_id.parse()?;
-        if self.project_repository.get(&id).is_none() {
+        if self.project_repository.get(&id).await?.is_none() {
             return Ok(None);
         }
         let board = Board::new(self.numbering.next(), id, request.name, request.description)?;
         let snapshot = board.snapshot();
-        self.board_repository.save(board);
+        self.board_repository.save(board, Version::NEW).await?;
         Ok(Some(snapshot))
     }
 
     /// Returns `Ok(None)` when no board with the given id exists.
-    pub fn update_board(
+    pub async fn update_board(
         &self,
         board_id: &str,
         request: UpdateBoardRequest,
     ) -> anyhow::Result<Option<BoardSnapshot>> {
-        let _guard = self.lock();
         let id: BoardId = board_id.parse()?;
-        let Some(mut board) = self.board_repository.get(&id) else {
-            return Ok(None);
-        };
-        board.update(request.name, request.description)?;
-        let snapshot = board.snapshot();
-        self.board_repository.save(board);
-        Ok(Some(snapshot))
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.mutation_guard
-            .lock()
-            .expect("board mutation guard poisoned")
+        loop {
+            let Some((mut board, version)) = self.board_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            board.update(request.name.clone(), request.description.clone())?;
+            let snapshot = board.snapshot();
+            match self.board_repository.save(board, version).await {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 }
 
@@ -103,68 +106,93 @@ mod tests {
 
     use wiab_core::organization::OrganizationId;
     use wiab_core::project::Project;
+    use wiab_core::repository::{RepoError, SaveError, Version};
 
     use super::*;
 
     #[derive(Default)]
     struct TestBoardRepository {
-        boards: RwLock<HashMap<BoardId, Board>>,
+        boards: RwLock<HashMap<BoardId, (Board, u64)>>,
     }
 
     impl BoardRepository for TestBoardRepository {
-        fn save(&self, board: Board) {
-            self.boards
+        async fn save(&self, board: Board, expected: Version) -> Result<Version, SaveError> {
+            let mut boards = self
+                .boards
                 .write()
-                .expect("test repository write lock poisoned")
-                .insert(board.id(), board);
+                .expect("test repository write lock poisoned");
+            let current = boards
+                .get(&board.id())
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            boards.insert(board.id(), (board, next.value()));
+            Ok(next)
         }
 
-        fn get(&self, id: &BoardId) -> Option<Board> {
-            self.boards
+        async fn get(&self, id: &BoardId) -> Result<Option<(Board, Version)>, RepoError> {
+            Ok(self
+                .boards
                 .read()
                 .expect("test repository read lock poisoned")
                 .get(id)
-                .cloned()
+                .map(|(board, version)| (board.clone(), Version::from_value(*version))))
         }
 
-        fn list(&self) -> Vec<Board> {
-            self.boards
+        async fn list(&self) -> Result<Vec<Board>, RepoError> {
+            Ok(self
+                .boards
                 .read()
                 .expect("test repository read lock poisoned")
                 .values()
-                .cloned()
-                .collect()
+                .map(|(board, _)| board.clone())
+                .collect())
         }
     }
 
     #[derive(Default)]
     struct TestProjectRepository {
-        projects: RwLock<HashMap<ProjectId, Project>>,
+        projects: RwLock<HashMap<ProjectId, (Project, u64)>>,
     }
 
     impl ProjectRepository for TestProjectRepository {
-        fn save(&self, project: Project) {
-            self.projects
+        async fn save(&self, project: Project, expected: Version) -> Result<Version, SaveError> {
+            let mut projects = self
+                .projects
                 .write()
-                .expect("test repository write lock poisoned")
-                .insert(project.id(), project);
+                .expect("test repository write lock poisoned");
+            let current = projects
+                .get(&project.id())
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            projects.insert(project.id(), (project, next.value()));
+            Ok(next)
         }
 
-        fn get(&self, id: &ProjectId) -> Option<Project> {
-            self.projects
+        async fn get(&self, id: &ProjectId) -> Result<Option<(Project, Version)>, RepoError> {
+            Ok(self
+                .projects
                 .read()
                 .expect("test repository read lock poisoned")
                 .get(id)
-                .cloned()
+                .map(|(project, version)| (project.clone(), Version::from_value(*version))))
         }
 
-        fn list(&self) -> Vec<Project> {
-            self.projects
+        async fn list(&self) -> Result<Vec<Project>, RepoError> {
+            Ok(self
+                .projects
                 .read()
                 .expect("test repository read lock poisoned")
                 .values()
-                .cloned()
-                .collect()
+                .map(|(project, _)| project.clone())
+                .collect())
         }
     }
 
@@ -187,7 +215,7 @@ mod tests {
         )
     }
 
-    fn seed_project(
+    async fn seed_project(
         service: &BoardApplicationService<TestBoardRepository, TestProjectRepository>,
         number: u64,
     ) -> String {
@@ -199,11 +227,15 @@ mod tests {
         )
         .unwrap();
         let id = project.id().to_string();
-        service.project_repository.save(project);
+        service
+            .project_repository
+            .save(project, Version::NEW)
+            .await
+            .unwrap();
         id
     }
 
-    fn create(
+    async fn create(
         service: &BoardApplicationService<TestBoardRepository, TestProjectRepository>,
         project_id: &str,
         name: &str,
@@ -216,28 +248,29 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .expect("project id should be valid")
             .expect("project should exist")
     }
 
-    #[test]
-    fn create_board_assigns_incrementing_ids() {
+    #[tokio::test]
+    async fn create_board_assigns_incrementing_ids() {
         let service = service();
-        let project_id = seed_project(&service, 1);
-        assert_eq!(create(&service, &project_id, "First").id, "B-1");
-        assert_eq!(create(&service, &project_id, "Second").id, "B-2");
+        let project_id = seed_project(&service, 1).await;
+        assert_eq!(create(&service, &project_id, "First").await.id, "B-1");
+        assert_eq!(create(&service, &project_id, "Second").await.id, "B-2");
     }
 
-    #[test]
-    fn create_board_records_project_id() {
+    #[tokio::test]
+    async fn create_board_records_project_id() {
         let service = service();
-        let project_id = seed_project(&service, 1);
-        let board = create(&service, &project_id, "Backlog");
+        let project_id = seed_project(&service, 1).await;
+        let board = create(&service, &project_id, "Backlog").await;
         assert_eq!(board.project_id, project_id);
     }
 
-    #[test]
-    fn create_board_under_missing_project_returns_none() {
+    #[tokio::test]
+    async fn create_board_under_missing_project_returns_none() {
         let service = service();
         let result = service
             .create_board(
@@ -247,12 +280,13 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn create_board_rejects_malformed_project_id() {
+    #[tokio::test]
+    async fn create_board_rejects_malformed_project_id() {
         let service = service();
         assert!(
             service
@@ -263,14 +297,15 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn create_board_rejects_empty_name() {
+    #[tokio::test]
+    async fn create_board_rejects_empty_name() {
         let service = service();
-        let project_id = seed_project(&service, 1);
+        let project_id = seed_project(&service, 1).await;
         assert!(
             service
                 .create_board(
@@ -280,30 +315,37 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn list_boards_partitions_by_project() {
+    #[tokio::test]
+    async fn list_boards_partitions_by_project() {
         let service = service();
-        let first_project = seed_project(&service, 1);
-        let second_project = seed_project(&service, 2);
-        create(&service, &first_project, "First");
-        create(&service, &second_project, "Second");
-        create(&service, &first_project, "Third");
-        service.board_repository.save(
-            Board::new(
-                BoardId::from_number(10),
-                ProjectId::from_number(1),
-                "Tenth".to_owned(),
-                String::new(),
+        let first_project = seed_project(&service, 1).await;
+        let second_project = seed_project(&service, 2).await;
+        create(&service, &first_project, "First").await;
+        create(&service, &second_project, "Second").await;
+        create(&service, &first_project, "Third").await;
+        service
+            .board_repository
+            .save(
+                Board::new(
+                    BoardId::from_number(10),
+                    ProjectId::from_number(1),
+                    "Tenth".to_owned(),
+                    String::new(),
+                )
+                .unwrap(),
+                Version::NEW,
             )
-            .unwrap(),
-        );
+            .await
+            .unwrap();
 
         let first_ids = service
             .list_boards(&first_project)
+            .await
             .unwrap()
             .expect("project should exist")
             .into_iter()
@@ -313,6 +355,7 @@ mod tests {
 
         let second_ids = service
             .list_boards(&second_project)
+            .await
             .unwrap()
             .expect("project should exist")
             .into_iter()
@@ -321,35 +364,35 @@ mod tests {
         assert_eq!(second_ids, vec!["B-2"]);
     }
 
-    #[test]
-    fn list_boards_for_missing_project_returns_none() {
+    #[tokio::test]
+    async fn list_boards_for_missing_project_returns_none() {
         let service = service();
-        assert!(service.list_boards("P-9").unwrap().is_none());
+        assert!(service.list_boards("P-9").await.unwrap().is_none());
     }
 
-    #[test]
-    fn list_boards_rejects_malformed_project_id() {
+    #[tokio::test]
+    async fn list_boards_rejects_malformed_project_id() {
         let service = service();
-        assert!(service.list_boards("bogus").is_err());
+        assert!(service.list_boards("bogus").await.is_err());
     }
 
-    #[test]
-    fn board_snapshot_returns_none_for_missing() {
+    #[tokio::test]
+    async fn board_snapshot_returns_none_for_missing() {
         let service = service();
-        assert!(service.board_snapshot("B-9").unwrap().is_none());
+        assert!(service.board_snapshot("B-9").await.unwrap().is_none());
     }
 
-    #[test]
-    fn board_snapshot_rejects_malformed_id() {
+    #[tokio::test]
+    async fn board_snapshot_rejects_malformed_id() {
         let service = service();
-        assert!(service.board_snapshot("bogus").is_err());
+        assert!(service.board_snapshot("bogus").await.is_err());
     }
 
-    #[test]
-    fn update_board_replaces_fields_but_not_project() {
+    #[tokio::test]
+    async fn update_board_replaces_fields_but_not_project() {
         let service = service();
-        let project_id = seed_project(&service, 1);
-        let board = create(&service, &project_id, "Backlog");
+        let project_id = seed_project(&service, 1).await;
+        let board = create(&service, &project_id, "Backlog").await;
         let updated = service
             .update_board(
                 &board.id,
@@ -358,6 +401,7 @@ mod tests {
                     description: "two weeks".to_owned(),
                 },
             )
+            .await
             .unwrap()
             .expect("board should exist");
         assert_eq!(updated.name, "Sprint");
@@ -366,13 +410,14 @@ mod tests {
 
         let reloaded = service
             .board_snapshot(&board.id)
+            .await
             .unwrap()
             .expect("board should exist");
         assert_eq!(reloaded.name, "Sprint");
     }
 
-    #[test]
-    fn update_missing_board_returns_none() {
+    #[tokio::test]
+    async fn update_missing_board_returns_none() {
         let service = service();
         let result = service
             .update_board(
@@ -382,15 +427,16 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn update_board_rejects_empty_name() {
+    #[tokio::test]
+    async fn update_board_rejects_empty_name() {
         let service = service();
-        let project_id = seed_project(&service, 1);
-        let board = create(&service, &project_id, "Backlog");
+        let project_id = seed_project(&service, 1).await;
+        let board = create(&service, &project_id, "Backlog").await;
         assert!(
             service
                 .update_board(
@@ -400,6 +446,7 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }

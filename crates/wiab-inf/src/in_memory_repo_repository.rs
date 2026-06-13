@@ -4,10 +4,11 @@ use std::{
 };
 
 use wiab_core::repo::{Repo, RepoId, RepoRepository};
+use wiab_core::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryRepoRepository {
-    repos: Arc<RwLock<HashMap<RepoId, Repo>>>,
+    repos: Arc<RwLock<HashMap<RepoId, (Repo, u64)>>>,
 }
 
 impl InMemoryRepoRepository {
@@ -17,27 +18,39 @@ impl InMemoryRepoRepository {
 }
 
 impl RepoRepository for InMemoryRepoRepository {
-    fn save(&self, repo: Repo) {
-        self.repos
+    async fn save(&self, repo: Repo, expected: Version) -> Result<Version, SaveError> {
+        let mut repos = self
+            .repos
             .write()
-            .expect("repo repository write lock poisoned")
-            .insert(repo.id(), repo);
+            .expect("repo repository write lock poisoned");
+        let current = repos
+            .get(&repo.id())
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        repos.insert(repo.id(), (repo, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, id: &RepoId) -> Option<Repo> {
-        self.repos
+    async fn get(&self, id: &RepoId) -> Result<Option<(Repo, Version)>, RepoError> {
+        Ok(self
+            .repos
             .read()
             .expect("repo repository read lock poisoned")
             .get(id)
-            .cloned()
+            .map(|(repo, version)| (repo.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<Repo> {
-        self.repos
+    async fn list(&self) -> Result<Vec<Repo>, RepoError> {
+        Ok(self
+            .repos
             .read()
             .expect("repo repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(repo, _)| repo.clone())
+            .collect())
     }
 }

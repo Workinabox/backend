@@ -1,9 +1,8 @@
 use crate::project::ProjectId;
 use crate::work::{Done, DoneId, WorkError, WorkId, WorkSnapshot};
 
-/// A unit of work: a `W-###` id, the project it belongs to, a title, a description, a
-/// list of `Done`s (acceptance criteria), and child works. `Work` is both the aggregate
-/// root and a node in the composite tree — a leaf is simply a `Work` with no children.
+/// A unit of work: a `W-###` id, the project it belongs to, a title, a description, and a
+/// list of `Done`s (acceptance criteria). `Work` is an aggregate root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Work {
     id: WorkId,
@@ -11,7 +10,6 @@ pub struct Work {
     title: String,
     description: String,
     dones: Vec<Done>,
-    children: Vec<Work>,
 }
 
 impl Work {
@@ -30,8 +28,25 @@ impl Work {
             title,
             description,
             dones: Vec::new(),
-            children: Vec::new(),
         })
+    }
+
+    /// Rebuild a `Work` from persisted state, including its `dones` (used by repository
+    /// implementations). Bypasses the invariants enforced by `new`/`add_done`.
+    pub fn from_persistence(
+        id: WorkId,
+        project_id: ProjectId,
+        title: String,
+        description: String,
+        dones: Vec<Done>,
+    ) -> Self {
+        Self {
+            id,
+            project_id,
+            title,
+            description,
+            dones,
+        }
     }
 
     pub fn id(&self) -> WorkId {
@@ -52,10 +67,6 @@ impl Work {
 
     pub fn dones(&self) -> &[Done] {
         &self.dones
-    }
-
-    pub fn children(&self) -> &[Work] {
-        &self.children
     }
 
     pub fn update(&mut self, title: String, description: String) -> Result<(), WorkError> {
@@ -84,36 +95,10 @@ impl Work {
         Ok(())
     }
 
-    pub fn add_child(&mut self, child: Work) -> Result<(), WorkError> {
-        if self.find(&child.id).is_some() {
-            return Err(WorkError::DuplicateWorkId(child.id));
-        }
-        self.children.push(child);
-        Ok(())
-    }
-
-    /// Recursively locate a work by id anywhere in this subtree (including `self`).
-    pub fn find(&self, id: &WorkId) -> Option<&Work> {
-        if self.id == *id {
-            return Some(self);
-        }
-        self.children.iter().find_map(|child| child.find(id))
-    }
-
-    /// Recursive mutable lookup — the entry point for mutating a nested sub-work.
-    pub fn find_mut(&mut self, id: &WorkId) -> Option<&mut Work> {
-        if self.id == *id {
-            return Some(self);
-        }
-        self.children
-            .iter_mut()
-            .find_map(|child| child.find_mut(id))
-    }
-
-    /// A work is done when all of its own dones are fulfilled and all of its children are
-    /// done. A node with no dones and no children is vacuously done.
+    /// A work is done when all of its own dones are fulfilled. A work with no dones is
+    /// vacuously done.
     pub fn is_done(&self) -> bool {
-        self.dones.iter().all(Done::is_fulfilled) && self.children.iter().all(Work::is_done)
+        self.dones.iter().all(Done::is_fulfilled)
     }
 
     pub fn snapshot(&self) -> WorkSnapshot {
@@ -123,7 +108,6 @@ impl Work {
             title: self.title.clone(),
             description: self.description.clone(),
             dones: self.dones.iter().map(Done::view).collect(),
-            children: self.children.iter().map(Work::snapshot).collect(),
             is_done: self.is_done(),
         }
     }
@@ -213,53 +197,13 @@ mod tests {
     }
 
     #[test]
-    fn parent_not_done_until_children_done() {
-        let mut parent = work(1, "Epic");
-        let parent_done = parent.add_done("review complete".to_owned()).unwrap();
-        parent.fulfill_done(&parent_done).unwrap();
-
-        let mut child = work(2, "Subtask");
-        let child_done = child.add_done("implemented".to_owned()).unwrap();
-        parent.add_child(child).unwrap();
-
-        // Parent's own dones are fulfilled, but the child is not done yet.
-        assert!(!parent.is_done());
-
-        parent
-            .find_mut(&WorkId::from_number(2))
-            .unwrap()
-            .fulfill_done(&child_done)
-            .unwrap();
-        assert!(parent.is_done());
-    }
-
-    #[test]
-    fn find_locates_nested_work() {
-        let mut parent = work(1, "Epic");
-        let mut child = work(2, "Subtask");
-        child.add_child(work(3, "Leaf")).unwrap();
-        parent.add_child(child).unwrap();
-
-        assert!(parent.find(&WorkId::from_number(3)).is_some());
-        assert!(parent.find(&WorkId::from_number(9)).is_none());
-    }
-
-    #[test]
-    fn add_child_rejects_duplicate_id() {
-        let mut parent = work(1, "Epic");
-        parent.add_child(work(2, "Subtask")).unwrap();
-        let error = parent.add_child(work(2, "Clash")).unwrap_err();
-        assert_eq!(error, WorkError::DuplicateWorkId(WorkId::from_number(2)));
-    }
-
-    #[test]
     fn empty_work_is_vacuously_done() {
         assert!(work(1, "Empty").is_done());
     }
 
     #[test]
     fn exposes_getters() {
-        let mut root = Work::new(
+        let root = Work::new(
             WorkId::from_number(1),
             ProjectId::from_number(2),
             "Epic".to_owned(),
@@ -271,8 +215,6 @@ mod tests {
         assert_eq!(root.title(), "Epic");
         assert_eq!(root.description(), "desc");
         assert!(root.dones().is_empty());
-        root.add_child(work(2, "Child")).unwrap();
-        assert_eq!(root.children().len(), 1);
     }
 
     #[test]
@@ -283,29 +225,6 @@ mod tests {
         assert!(root.is_done());
         root.unfulfill_done(&done).unwrap();
         assert!(!root.is_done());
-    }
-
-    #[test]
-    fn find_mut_returns_none_for_missing() {
-        let mut root = work(1, "Ship");
-        assert!(root.find_mut(&WorkId::from_number(42)).is_none());
-    }
-
-    #[test]
-    fn snapshot_mirrors_tree_with_completion() {
-        let mut parent = work(1, "Epic");
-        let parent_done = parent.add_done("review".to_owned()).unwrap();
-        parent.add_child(work(2, "Subtask")).unwrap();
-
-        let snapshot = parent.snapshot();
-        assert_eq!(snapshot.id, "W-1");
-        assert_eq!(snapshot.children.len(), 1);
-        assert_eq!(snapshot.children[0].id, "W-2");
-        assert!(snapshot.children[0].is_done); // empty child, vacuously done
-        assert!(!snapshot.is_done); // parent's own done outstanding
-
-        parent.fulfill_done(&parent_done).unwrap();
-        assert!(parent.snapshot().is_done);
     }
 
     #[test]

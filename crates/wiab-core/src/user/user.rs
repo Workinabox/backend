@@ -37,8 +37,43 @@ impl User {
         })
     }
 
+    /// Reconstitute a user from persisted state (used by repository implementations).
+    /// Bypasses validation: the data was already validated when first created.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persistence(
+        id: UserId,
+        kind: UserKind,
+        name: String,
+        email: Option<String>,
+        agent_id: Option<AgentId>,
+        ssh_keys: Vec<SshKey>,
+        tokens: Vec<AccessToken>,
+    ) -> User {
+        Self {
+            id,
+            kind,
+            name,
+            email,
+            agent_id,
+            ssh_keys,
+            tokens,
+        }
+    }
+
     pub fn id(&self) -> UserId {
         self.id
+    }
+
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
+
+    pub fn ssh_keys(&self) -> &[SshKey] {
+        &self.ssh_keys
+    }
+
+    pub fn tokens(&self) -> &[AccessToken] {
+        &self.tokens
     }
 
     pub fn kind(&self) -> UserKind {

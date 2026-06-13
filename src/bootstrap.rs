@@ -11,26 +11,35 @@ use wiab_app::{
     UserApplicationService, WorkApplicationService,
 };
 use wiab_core::{
-    access::{Role, Scope},
+    access::{Role, RoleAssignmentRepository, Scope},
+    agent::AgentRepository,
+    board::BoardRepository,
     meeting_traits::{Clock, MeetingIntelligence},
-    organization::OrganizationId,
-    repo::GitBackend,
+    organization::{OrganizationId, OrganizationRepository},
+    pipeline::PipelineRepository,
+    project::ProjectRepository,
+    repo::{GitBackend, RepoRepository},
     transcript::FinalizedTranscript,
-    user::UserId,
+    user::{UserId, UserRepository},
+    work::WorkRepository,
 };
 use wiab_inf::{
-    AppState, DefaultSpeechSynthesizer, Git2Backend, HeuristicMeetingIntelligence,
-    InMemoryAgentNumbering, InMemoryAgentRepository, InMemoryBoardNumbering,
-    InMemoryBoardRepository, InMemoryMeetingRepository, InMemoryOrganizationNumbering,
-    InMemoryOrganizationRepository, InMemoryPipelineNumbering, InMemoryPipelineRepository,
-    InMemoryProjectNumbering, InMemoryProjectRepository, InMemoryRepoNumbering,
-    InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
-    InMemoryUserNumbering, InMemoryUserRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
-    LlamaMeetingIntelligence, RandomTokenFactory, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher,
-    SystemClock,
+    AgentRepo, AppState, BoardRepo, DefaultSpeechSynthesizer, Git2Backend,
+    HeuristicMeetingIntelligence, InMemoryAgentNumbering, InMemoryAgentRepository,
+    InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
+    InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
+    InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
+    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
+    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
+    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo,
+    PipelineRepo, PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
+    PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
+    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresWorkRepository, ProjectRepo,
+    RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
+    Sha256TokenHasher, SystemClock, UserRepo, WorkRepo, pg_pool,
 };
 
-pub async fn build_app_state() -> anyhow::Result<AppState> {
+pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::Result<AppState> {
     let seed_clock = SystemClock;
     let meeting_repository = InMemoryMeetingRepository::with_seed_data(|| seed_clock.now_rfc3339());
     let intelligence = load_meeting_intelligence()?;
@@ -41,35 +50,83 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
         Arc::new(SystemClock),
     ));
 
-    log_loaded_meetings(meeting_service.as_ref());
+    log_loaded_meetings(meeting_service.as_ref()).await;
 
-    let organization_repository = InMemoryOrganizationRepository::new();
+    // Choose the persistence backend from config. Meeting state is always in-memory
+    // (ephemeral live sessions); every other aggregate is backed by the selected store.
+    let pool = match persistence.trim().to_ascii_lowercase().as_str() {
+        "memory" => {
+            info!("persistence backend: in-memory (data is lost on restart)");
+            None
+        }
+        "postgres" => {
+            let pool = pg_pool::build_pool(database_url)
+                .await
+                .context("failed to connect to Postgres")?;
+            pg_pool::run_migrations(&pool)
+                .await
+                .context("failed to apply database migrations")?;
+            info!("persistence backend: postgres");
+            Some(pool)
+        }
+        other => anyhow::bail!(
+            "unsupported persistence value '{other}' (expected 'memory' or 'postgres')"
+        ),
+    };
+
+    let organization_repo = match &pool {
+        Some(pool) => OrganizationRepo::Postgres(PostgresOrganizationRepository::new(pool.clone())),
+        None => OrganizationRepo::InMemory(InMemoryOrganizationRepository::new()),
+    };
+    let organization_numbering = InMemoryOrganizationNumbering::starting_at(next_after(
+        &organization_repo.list().await?,
+        |organization| organization.id().number(),
+    ));
     let organization_service = Arc::new(OrganizationApplicationService::new(
-        organization_repository.clone(),
-        Arc::new(InMemoryOrganizationNumbering::new()),
+        organization_repo.clone(),
+        Arc::new(organization_numbering),
     ));
 
-    let project_repository = InMemoryProjectRepository::new();
+    let project_repo = match &pool {
+        Some(pool) => ProjectRepo::Postgres(PostgresProjectRepository::new(pool.clone())),
+        None => ProjectRepo::InMemory(InMemoryProjectRepository::new()),
+    };
+    let project_numbering =
+        InMemoryProjectNumbering::starting_at(next_after(&project_repo.list().await?, |project| {
+            project.id().number()
+        }));
     let project_service = Arc::new(ProjectApplicationService::new(
-        project_repository.clone(),
-        organization_repository.clone(),
-        Arc::new(InMemoryProjectNumbering::new()),
+        project_repo.clone(),
+        organization_repo.clone(),
+        Arc::new(project_numbering),
     ));
 
-    seed_default_organization(organization_service.as_ref(), project_service.as_ref())?;
-
-    let agent_repository = InMemoryAgentRepository::new();
+    let agent_repo = match &pool {
+        Some(pool) => AgentRepo::Postgres(PostgresAgentRepository::new(pool.clone())),
+        None => AgentRepo::InMemory(InMemoryAgentRepository::new()),
+    };
+    let agent_numbering =
+        InMemoryAgentNumbering::starting_at(next_after(&agent_repo.list().await?, |agent| {
+            agent.id().number()
+        }));
     let agent_service = Arc::new(AgentApplicationService::new(
-        agent_repository,
-        organization_repository.clone(),
-        Arc::new(InMemoryAgentNumbering::new()),
+        agent_repo,
+        organization_repo.clone(),
+        Arc::new(agent_numbering),
     ));
 
-    let board_repository = InMemoryBoardRepository::new();
+    let board_repo = match &pool {
+        Some(pool) => BoardRepo::Postgres(PostgresBoardRepository::new(pool.clone())),
+        None => BoardRepo::InMemory(InMemoryBoardRepository::new()),
+    };
+    let board_numbering =
+        InMemoryBoardNumbering::starting_at(next_after(&board_repo.list().await?, |board| {
+            board.id().number()
+        }));
     let board_service = Arc::new(BoardApplicationService::new(
-        board_repository,
-        project_repository.clone(),
-        Arc::new(InMemoryBoardNumbering::new()),
+        board_repo,
+        project_repo.clone(),
+        Arc::new(board_numbering),
     ));
 
     let git_root = std::env::var("WIAB_GIT_ROOT")
@@ -80,50 +137,93 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
     info!("hosting git repos under {}", git_root.display());
     let git_backend: Arc<dyn GitBackend> = Arc::new(Git2Backend::new(git_root.clone()));
 
-    let repo_repository = InMemoryRepoRepository::new();
+    let repo_repo = match &pool {
+        Some(pool) => RepoRepo::Postgres(PostgresRepoRepository::new(pool.clone())),
+        None => RepoRepo::InMemory(InMemoryRepoRepository::new()),
+    };
+    let repo_numbering =
+        InMemoryRepoNumbering::starting_at(next_after(&repo_repo.list().await?, |repo| {
+            repo.id().number()
+        }));
     let repo_service = Arc::new(RepoApplicationService::new(
-        repo_repository.clone(),
-        project_repository.clone(),
-        Arc::new(InMemoryRepoNumbering::new()),
+        repo_repo.clone(),
+        project_repo.clone(),
+        Arc::new(repo_numbering),
         git_backend,
     ));
 
     // Identity, credentials, and access control.
-    let user_repository = InMemoryUserRepository::new();
+    let user_repo = match &pool {
+        Some(pool) => UserRepo::Postgres(PostgresUserRepository::new(pool.clone())),
+        None => UserRepo::InMemory(InMemoryUserRepository::new()),
+    };
+    let user_numbering =
+        InMemoryUserNumbering::starting_at(next_after(&user_repo.list().await?, |user| {
+            user.id().number()
+        }));
     let user_service = Arc::new(UserApplicationService::new(
-        user_repository.clone(),
-        Arc::new(InMemoryUserNumbering::new()),
+        user_repo.clone(),
+        Arc::new(user_numbering),
         Arc::new(RandomTokenFactory),
         Arc::new(Sha256TokenHasher),
         Arc::new(Sha256KeyFingerprinter),
         Arc::new(SystemClock),
     ));
 
-    let assignment_repository = InMemoryRoleAssignmentRepository::new();
+    let assignment_repo = match &pool {
+        Some(pool) => {
+            RoleAssignmentRepo::Postgres(PostgresRoleAssignmentRepository::new(pool.clone()))
+        }
+        None => RoleAssignmentRepo::InMemory(InMemoryRoleAssignmentRepository::new()),
+    };
+    let assignment_numbering = InMemoryRoleAssignmentNumbering::starting_at(next_after(
+        &assignment_repo.list().await?,
+        |assignment| assignment.id().number(),
+    ));
     let access_service = Arc::new(AccessApplicationService::new(
-        assignment_repository.clone(),
-        user_repository.clone(),
-        Arc::new(InMemoryRoleAssignmentNumbering::new()),
+        assignment_repo.clone(),
+        user_repo.clone(),
+        Arc::new(assignment_numbering),
     ));
     let authorization_service = Arc::new(AuthorizationService::new(
-        assignment_repository.clone(),
-        repo_repository.clone(),
-        project_repository.clone(),
+        assignment_repo.clone(),
+        repo_repo.clone(),
+        project_repo.clone(),
     ));
 
-    seed_owner(user_service.as_ref(), access_service.as_ref());
+    // Seed the default org + owner only when the store is empty, so a Postgres-backed
+    // restart does not try to re-create them (which would fail the unique-id insert).
+    if organization_service.list_organizations().await?.is_empty() {
+        seed_default_organization(organization_service.as_ref(), project_service.as_ref()).await?;
+        seed_owner(user_service.as_ref(), access_service.as_ref()).await;
+    }
 
-    let pipeline_repository = InMemoryPipelineRepository::new();
+    let pipeline_repo = match &pool {
+        Some(pool) => PipelineRepo::Postgres(PostgresPipelineRepository::new(pool.clone())),
+        None => PipelineRepo::InMemory(InMemoryPipelineRepository::new()),
+    };
+    let pipeline_numbering = InMemoryPipelineNumbering::starting_at(next_after(
+        &pipeline_repo.list().await?,
+        |pipeline| pipeline.id().number(),
+    ));
     let pipeline_service = Arc::new(PipelineApplicationService::new(
-        pipeline_repository,
-        project_repository.clone(),
-        Arc::new(InMemoryPipelineNumbering::new()),
+        pipeline_repo,
+        project_repo.clone(),
+        Arc::new(pipeline_numbering),
     ));
 
+    let work_repo = match &pool {
+        Some(pool) => WorkRepo::Postgres(PostgresWorkRepository::new(pool.clone())),
+        None => WorkRepo::InMemory(InMemoryWorkRepository::new()),
+    };
+    let work_numbering =
+        InMemoryWorkNumbering::starting_at(next_after(&work_repo.list().await?, |work| {
+            work.id().number()
+        }));
     let work_service = Arc::new(WorkApplicationService::new(
-        InMemoryWorkRepository::new(),
-        project_repository.clone(),
-        Arc::new(InMemoryWorkNumbering::new()),
+        work_repo,
+        project_repo.clone(),
+        Arc::new(work_numbering),
     ));
 
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<FinalizedTranscript>();
@@ -154,18 +254,22 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
     })
 }
 
-fn seed_default_organization(
-    organization_service: &OrganizationApplicationService<InMemoryOrganizationRepository>,
-    project_service: &ProjectApplicationService<
-        InMemoryProjectRepository,
-        InMemoryOrganizationRepository,
-    >,
+/// Highest id number already present, so sequential numbering resumes at `n + 1` after a
+/// restart instead of colliding with persisted ids. Returns 0 for an empty store.
+fn next_after<T>(items: &[T], number: impl Fn(&T) -> u64) -> u64 {
+    items.iter().map(number).max().unwrap_or(0)
+}
+
+async fn seed_default_organization(
+    organization_service: &OrganizationApplicationService<OrganizationRepo>,
+    project_service: &ProjectApplicationService<ProjectRepo, OrganizationRepo>,
 ) -> anyhow::Result<()> {
     let organization = organization_service
         .create_organization(CreateOrganizationRequest {
             name: "Gos & co".to_owned(),
             description: String::new(),
         })
+        .await
         .context("failed to seed default organization")?;
     let project = project_service
         .create_project(
@@ -175,6 +279,7 @@ fn seed_default_organization(
                 description: String::new(),
             },
         )
+        .await
         .context("failed to seed default project")?
         .expect("seed organization exists");
     info!(
@@ -187,12 +292,9 @@ fn seed_default_organization(
 /// Seeds an initial Owner user for the default org and logs a one-time access token, so
 /// there is a way to authenticate before the real identity provider exists. Re-seeded each
 /// boot because metadata is in-memory.
-fn seed_owner(
-    user_service: &UserApplicationService<InMemoryUserRepository>,
-    access_service: &AccessApplicationService<
-        InMemoryRoleAssignmentRepository,
-        InMemoryUserRepository,
-    >,
+async fn seed_owner(
+    user_service: &UserApplicationService<UserRepo>,
+    access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
 ) {
     let owner = user_service
         .create_user(CreateUserRequest {
@@ -200,13 +302,17 @@ fn seed_owner(
             name: "Owner".to_owned(),
             email: Some("owner@workinabox.local".to_owned()),
         })
+        .await
         .expect("failed to seed owner user");
     let user_id: UserId = owner.id.parse().expect("seeded owner id is valid");
-    access_service.grant_direct(
-        user_id,
-        Scope::Org(OrganizationId::from_number(1)),
-        Role::Owner,
-    );
+    access_service
+        .grant_direct(
+            user_id,
+            Scope::Org(OrganizationId::from_number(1)),
+            Role::Owner,
+        )
+        .await
+        .expect("failed to grant owner role");
     let issued = user_service
         .issue_token(
             &owner.id,
@@ -218,6 +324,7 @@ fn seed_owner(
                 expires_at: None,
             },
         )
+        .await
         .expect("failed to issue bootstrap token")
         .expect("seeded owner exists");
     info!(
@@ -226,8 +333,13 @@ fn seed_owner(
     );
 }
 
-fn log_loaded_meetings(meeting_service: &MeetingApplicationService<InMemoryMeetingRepository>) {
-    let meetings = meeting_service.list_meetings();
+async fn log_loaded_meetings(
+    meeting_service: &MeetingApplicationService<InMemoryMeetingRepository>,
+) {
+    let meetings = meeting_service
+        .list_meetings()
+        .await
+        .expect("failed to list seeded meetings");
     info!("loaded {} meetings from startup data", meetings.len());
     for meeting in &meetings {
         info!("meeting '{}' state {:?}", meeting.title, meeting.state);

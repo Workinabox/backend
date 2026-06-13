@@ -95,12 +95,13 @@ impl Handler for GitSshHandler {
             .state
             .user_service
             .resolve_user_by_fingerprint(&fingerprint)
+            .await
         {
-            Some(user) => {
+            Ok(Some(user)) => {
                 self.user = Some(user);
                 Ok(Auth::Accept)
             }
-            None => Ok(Auth::reject()),
+            Ok(None) | Err(_) => Ok(Auth::reject()),
         }
     }
 
@@ -137,7 +138,7 @@ impl Handler for GitSshHandler {
         } else {
             Operation::Read
         };
-        if !self.authorize(id, operation) {
+        if !self.authorize(id, operation).await {
             return fail(session, channel, "insufficient permissions").await;
         }
 
@@ -172,12 +173,14 @@ impl Handler for GitSshHandler {
 impl GitSshHandler {
     /// Whether the key-authenticated user may perform `operation` on `repo`. SSH carries
     /// no token, so there is no scope cap.
-    fn authorize(&self, repo: RepoId, operation: Operation) -> bool {
+    async fn authorize(&self, repo: RepoId, operation: Operation) -> bool {
         match self.user {
             Some(user) => self
                 .state
                 .authorization_service
-                .authorize(user, repo, operation, None),
+                .authorize(user, repo, operation, None)
+                .await
+                .unwrap_or(false),
             None => false,
         }
     }

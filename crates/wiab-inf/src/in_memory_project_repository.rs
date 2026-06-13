@@ -4,10 +4,11 @@ use std::{
 };
 
 use wiab_core::project::{Project, ProjectId, ProjectRepository};
+use wiab_core::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryProjectRepository {
-    projects: Arc<RwLock<HashMap<ProjectId, Project>>>,
+    projects: Arc<RwLock<HashMap<ProjectId, (Project, u64)>>>,
 }
 
 impl InMemoryProjectRepository {
@@ -17,27 +18,39 @@ impl InMemoryProjectRepository {
 }
 
 impl ProjectRepository for InMemoryProjectRepository {
-    fn save(&self, project: Project) {
-        self.projects
+    async fn save(&self, project: Project, expected: Version) -> Result<Version, SaveError> {
+        let mut projects = self
+            .projects
             .write()
-            .expect("project repository write lock poisoned")
-            .insert(project.id(), project);
+            .expect("project repository write lock poisoned");
+        let current = projects
+            .get(&project.id())
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        projects.insert(project.id(), (project, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, id: &ProjectId) -> Option<Project> {
-        self.projects
+    async fn get(&self, id: &ProjectId) -> Result<Option<(Project, Version)>, RepoError> {
+        Ok(self
+            .projects
             .read()
             .expect("project repository read lock poisoned")
             .get(id)
-            .cloned()
+            .map(|(project, version)| (project.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<Project> {
-        self.projects
+    async fn list(&self) -> Result<Vec<Project>, RepoError> {
+        Ok(self
+            .projects
             .read()
             .expect("project repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(project, _)| project.clone())
+            .collect())
     }
 }

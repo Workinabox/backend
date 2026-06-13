@@ -45,8 +45,57 @@ impl AccessToken {
         })
     }
 
+    /// Reconstitute an access token from persisted state (used by repository
+    /// implementations). Bypasses validation: the data was already validated on creation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persistence(
+        id: TokenId,
+        label: String,
+        hash: String,
+        display: String,
+        created_at: String,
+        expires_at: Option<String>,
+        last_used_at: Option<String>,
+        scope: TokenScope,
+    ) -> AccessToken {
+        Self {
+            id,
+            label,
+            hash,
+            display,
+            created_at,
+            expires_at,
+            last_used_at,
+            scope,
+        }
+    }
+
     pub fn id(&self) -> TokenId {
         self.id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    pub fn expires_at(&self) -> Option<&str> {
+        self.expires_at.as_deref()
+    }
+
+    pub fn last_used_at(&self) -> Option<&str> {
+        self.last_used_at.as_deref()
     }
 
     pub fn matches_hash(&self, hash: &str) -> bool {

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::user::{User, UserId, UserRepository};
 
 #[derive(Clone, Default)]
 pub struct InMemoryUserRepository {
-    users: Arc<RwLock<HashMap<UserId, User>>>,
+    users: Arc<RwLock<HashMap<UserId, (User, u64)>>>,
 }
 
 impl InMemoryUserRepository {
@@ -15,27 +16,39 @@ impl InMemoryUserRepository {
 }
 
 impl UserRepository for InMemoryUserRepository {
-    fn save(&self, user: User) {
-        self.users
+    async fn save(&self, user: User, expected: Version) -> Result<Version, SaveError> {
+        let mut users = self
+            .users
             .write()
-            .expect("user repository write lock poisoned")
-            .insert(user.id(), user);
+            .expect("user repository write lock poisoned");
+        let current = users
+            .get(&user.id())
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        users.insert(user.id(), (user, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, id: &UserId) -> Option<User> {
-        self.users
+    async fn get(&self, id: &UserId) -> Result<Option<(User, Version)>, RepoError> {
+        Ok(self
+            .users
             .read()
             .expect("user repository read lock poisoned")
             .get(id)
-            .cloned()
+            .map(|(user, version)| (user.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<User> {
-        self.users
+    async fn list(&self) -> Result<Vec<User>, RepoError> {
+        Ok(self
+            .users
             .read()
             .expect("user repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(user, _)| user.clone())
+            .collect())
     }
 }

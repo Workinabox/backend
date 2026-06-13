@@ -20,6 +20,15 @@ impl Done {
         })
     }
 
+    /// Rebuild a `Done` from persisted state (used by repository implementations).
+    pub fn from_persistence(id: DoneId, criterion: String, fulfilled: bool) -> Self {
+        Self {
+            id,
+            criterion,
+            fulfilled,
+        }
+    }
+
     pub fn id(&self) -> DoneId {
         self.id
     }

@@ -4,10 +4,11 @@ use std::{
 };
 
 use wiab_core::organization::{Organization, OrganizationId, OrganizationRepository};
+use wiab_core::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryOrganizationRepository {
-    organizations: Arc<RwLock<HashMap<OrganizationId, Organization>>>,
+    organizations: Arc<RwLock<HashMap<OrganizationId, (Organization, u64)>>>,
 }
 
 impl InMemoryOrganizationRepository {
@@ -17,27 +18,43 @@ impl InMemoryOrganizationRepository {
 }
 
 impl OrganizationRepository for InMemoryOrganizationRepository {
-    fn save(&self, organization: Organization) {
-        self.organizations
+    async fn save(
+        &self,
+        organization: Organization,
+        expected: Version,
+    ) -> Result<Version, SaveError> {
+        let mut organizations = self
+            .organizations
             .write()
-            .expect("organization repository write lock poisoned")
-            .insert(organization.id(), organization);
+            .expect("organization repository write lock poisoned");
+        let current = organizations
+            .get(&organization.id())
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        organizations.insert(organization.id(), (organization, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, id: &OrganizationId) -> Option<Organization> {
-        self.organizations
+    async fn get(&self, id: &OrganizationId) -> Result<Option<(Organization, Version)>, RepoError> {
+        Ok(self
+            .organizations
             .read()
             .expect("organization repository read lock poisoned")
             .get(id)
-            .cloned()
+            .map(|(organization, version)| (organization.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<Organization> {
-        self.organizations
+    async fn list(&self) -> Result<Vec<Organization>, RepoError> {
+        Ok(self
+            .organizations
             .read()
             .expect("organization repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(organization, _)| organization.clone())
+            .collect())
     }
 }
