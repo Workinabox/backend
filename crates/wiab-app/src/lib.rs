@@ -1,5 +1,8 @@
+mod access_application_service;
+mod access_requests;
 mod agent_application_service;
 mod agent_requests;
+mod authorization_service;
 mod board_application_service;
 mod board_requests;
 mod create_meeting_request;
@@ -14,10 +17,15 @@ mod project_application_service;
 mod project_requests;
 mod repo_application_service;
 mod repo_requests;
+mod user_application_service;
+mod user_requests;
 mod work_application_service;
 
+pub use access_application_service::AccessApplicationService;
+pub use access_requests::GrantRoleRequest;
 pub use agent_application_service::AgentApplicationService;
 pub use agent_requests::{CreateAgentRequest, UpdateAgentRequest};
+pub use authorization_service::AuthorizationService;
 pub use board_application_service::BoardApplicationService;
 pub use board_requests::{CreateBoardRequest, UpdateBoardRequest};
 pub use create_meeting_request::{CreateMeetingParticipant, CreateMeetingRequest};
@@ -31,5 +39,11 @@ pub use pipeline_requests::{CreatePipelineRequest, UpdatePipelineRequest};
 pub use project_application_service::ProjectApplicationService;
 pub use project_requests::{CreateProjectRequest, UpdateProjectRequest};
 pub use repo_application_service::RepoApplicationService;
-pub use repo_requests::{CreateRepoRequest, UpdateRepoRequest};
+pub use repo_requests::{
+    CommitChangesRequest, CreateRepoRequest, SetVisibilityRequest, UpdateRepoRequest,
+};
+pub use user_application_service::UserApplicationService;
+pub use user_requests::{
+    AddSshKeyRequest, CreateUserRequest, IssueTokenRequest, IssuedTokenSnapshot,
+};
 pub use work_application_service::WorkApplicationService;

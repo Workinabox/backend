@@ -1,13 +1,15 @@
 use crate::project::ProjectId;
-use crate::repo::{RepoError, RepoId, RepoSnapshot};
+use crate::repo::{RepoError, RepoId, RepoSnapshot, Visibility};
 
-/// A repo: an `R-###` id, the project it belongs to, a name, and a description.
+/// A repo: an `R-###` id, the project it belongs to, a name, a description, and whether
+/// it is readable anonymously. Access is governed by users and roles, not by the repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
     id: RepoId,
     project_id: ProjectId,
     name: String,
     description: String,
+    visibility: Visibility,
 }
 
 impl Repo {
@@ -16,6 +18,7 @@ impl Repo {
         project_id: ProjectId,
         name: String,
         description: String,
+        visibility: Visibility,
     ) -> Result<Self, RepoError> {
         if name.trim().is_empty() {
             return Err(RepoError::EmptyName);
@@ -25,6 +28,7 @@ impl Repo {
             project_id,
             name,
             description,
+            visibility,
         })
     }
 
@@ -44,6 +48,14 @@ impl Repo {
         &self.description
     }
 
+    pub fn visibility(&self) -> Visibility {
+        self.visibility
+    }
+
+    pub fn set_visibility(&mut self, visibility: Visibility) {
+        self.visibility = visibility;
+    }
+
     pub fn update(&mut self, name: String, description: String) -> Result<(), RepoError> {
         if name.trim().is_empty() {
             return Err(RepoError::EmptyName);
@@ -59,6 +71,7 @@ impl Repo {
             project_id: self.project_id.to_string(),
             name: self.name.clone(),
             description: self.description.clone(),
+            visibility: self.visibility.to_string(),
         }
     }
 }
@@ -73,6 +86,7 @@ mod tests {
             ProjectId::from_number(1),
             name.to_owned(),
             String::new(),
+            Visibility::Private,
         )
         .unwrap()
     }
@@ -84,6 +98,7 @@ mod tests {
             ProjectId::from_number(1),
             "  ".to_owned(),
             String::new(),
+            Visibility::Private,
         )
         .unwrap_err();
         assert_eq!(error, RepoError::EmptyName);
@@ -96,12 +111,22 @@ mod tests {
             ProjectId::from_number(2),
             "backend".to_owned(),
             "desc".to_owned(),
+            Visibility::Public,
         )
         .unwrap();
         assert_eq!(repo.id(), RepoId::from_number(1));
         assert_eq!(repo.project_id(), ProjectId::from_number(2));
         assert_eq!(repo.name(), "backend");
         assert_eq!(repo.description(), "desc");
+        assert_eq!(repo.visibility(), Visibility::Public);
+    }
+
+    #[test]
+    fn set_visibility_toggles_anonymous_read() {
+        let mut repo = repo(1, "backend");
+        assert_eq!(repo.visibility(), Visibility::Private);
+        repo.set_visibility(Visibility::Public);
+        assert!(repo.visibility().is_public());
     }
 
     #[test]
@@ -132,6 +157,7 @@ mod tests {
             ProjectId::from_number(2),
             "backend".to_owned(),
             "desc".to_owned(),
+            Visibility::Public,
         )
         .unwrap();
         let snapshot = repo.snapshot();
@@ -139,5 +165,6 @@ mod tests {
         assert_eq!(snapshot.project_id, "P-2");
         assert_eq!(snapshot.name, "backend");
         assert_eq!(snapshot.description, "desc");
+        assert_eq!(snapshot.visibility, "public");
     }
 }

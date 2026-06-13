@@ -1,3 +1,4 @@
+pub mod access;
 pub mod agent;
 pub mod audio;
 pub mod board;
@@ -8,4 +9,5 @@ pub mod pipeline;
 pub mod project;
 pub mod repo;
 pub mod transcript;
+pub mod user;
 pub mod work;

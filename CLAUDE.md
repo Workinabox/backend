@@ -65,3 +65,19 @@ Dependencies point inward. The domain crate depends on nothing external. This is
 - `thiserror` for domain errors, one error enum per module.
 - `#[cfg(test)] mod tests` in each module.
 - Run `cargo fmt` and `cargo clippy` before considering work done.
+
+## Runtime requirements
+
+- The system `git` binary must be on `PATH`. libgit2 (`git2`) powers object reads and
+  server-side commits, but the on-the-wire pack protocol (clone/push over HTTP and SSH)
+  is served by spawning `git upload-pack` / `git receive-pack`.
+
+## Git hosting config
+
+- `WIAB_GIT_ROOT` — directory holding bare repos as `<root>/R-<n>.git` (default: a
+  `wiab-git` dir under the system temp dir).
+- `WIAB_GIT_SSH_ADDR` — bind address for the git SSH transport (default `0.0.0.0:2222`).
+- `WIAB_GIT_SSH_HOST_KEY` — path to the SSH host key; an ephemeral key is generated if
+  unset (dev only — clients see a changing host key).
+- Push and the write API are gated by a per-repo push token (minted once at repo
+  creation). Over HTTP it is the Basic-auth password; over SSH it is the SSH password.

@@ -4,22 +4,30 @@ use anyhow::Context;
 use tokio::sync::mpsc;
 use tracing::info;
 use wiab_app::{
-    AgentApplicationService, BoardApplicationService, CreateOrganizationRequest,
-    CreateProjectRequest, MeetingApplicationService, OrganizationApplicationService,
+    AccessApplicationService, AgentApplicationService, AuthorizationService,
+    BoardApplicationService, CreateOrganizationRequest, CreateProjectRequest, CreateUserRequest,
+    IssueTokenRequest, MeetingApplicationService, OrganizationApplicationService,
     PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
-    WorkApplicationService,
+    UserApplicationService, WorkApplicationService,
 };
 use wiab_core::{
+    access::{Role, Scope},
     meeting_traits::{Clock, MeetingIntelligence},
+    organization::OrganizationId,
+    repo::GitBackend,
     transcript::FinalizedTranscript,
+    user::UserId,
 };
 use wiab_inf::{
-    AppState, DefaultSpeechSynthesizer, HeuristicMeetingIntelligence, InMemoryAgentNumbering,
-    InMemoryAgentRepository, InMemoryBoardNumbering, InMemoryBoardRepository,
-    InMemoryMeetingRepository, InMemoryOrganizationNumbering, InMemoryOrganizationRepository,
-    InMemoryPipelineNumbering, InMemoryPipelineRepository, InMemoryProjectNumbering,
-    InMemoryProjectRepository, InMemoryRepoNumbering, InMemoryRepoRepository,
-    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, Sfu, SystemClock,
+    AppState, DefaultSpeechSynthesizer, Git2Backend, HeuristicMeetingIntelligence,
+    InMemoryAgentNumbering, InMemoryAgentRepository, InMemoryBoardNumbering,
+    InMemoryBoardRepository, InMemoryMeetingRepository, InMemoryOrganizationNumbering,
+    InMemoryOrganizationRepository, InMemoryPipelineNumbering, InMemoryPipelineRepository,
+    InMemoryProjectNumbering, InMemoryProjectRepository, InMemoryRepoNumbering,
+    InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
+    InMemoryUserNumbering, InMemoryUserRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
+    LlamaMeetingIntelligence, RandomTokenFactory, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher,
+    SystemClock,
 };
 
 pub async fn build_app_state() -> anyhow::Result<AppState> {
@@ -64,12 +72,46 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
         Arc::new(InMemoryBoardNumbering::new()),
     ));
 
+    let git_root = std::env::var("WIAB_GIT_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("wiab-git"));
+    std::fs::create_dir_all(&git_root)
+        .with_context(|| format!("failed to create git root {}", git_root.display()))?;
+    info!("hosting git repos under {}", git_root.display());
+    let git_backend: Arc<dyn GitBackend> = Arc::new(Git2Backend::new(git_root.clone()));
+
     let repo_repository = InMemoryRepoRepository::new();
     let repo_service = Arc::new(RepoApplicationService::new(
-        repo_repository,
+        repo_repository.clone(),
         project_repository.clone(),
         Arc::new(InMemoryRepoNumbering::new()),
+        git_backend,
     ));
+
+    // Identity, credentials, and access control.
+    let user_repository = InMemoryUserRepository::new();
+    let user_service = Arc::new(UserApplicationService::new(
+        user_repository.clone(),
+        Arc::new(InMemoryUserNumbering::new()),
+        Arc::new(RandomTokenFactory),
+        Arc::new(Sha256TokenHasher),
+        Arc::new(Sha256KeyFingerprinter),
+        Arc::new(SystemClock),
+    ));
+
+    let assignment_repository = InMemoryRoleAssignmentRepository::new();
+    let access_service = Arc::new(AccessApplicationService::new(
+        assignment_repository.clone(),
+        user_repository.clone(),
+        Arc::new(InMemoryRoleAssignmentNumbering::new()),
+    ));
+    let authorization_service = Arc::new(AuthorizationService::new(
+        assignment_repository.clone(),
+        repo_repository.clone(),
+        project_repository.clone(),
+    ));
+
+    seed_owner(user_service.as_ref(), access_service.as_ref());
 
     let pipeline_repository = InMemoryPipelineRepository::new();
     let pipeline_service = Arc::new(PipelineApplicationService::new(
@@ -99,9 +141,13 @@ pub async fn build_app_state() -> anyhow::Result<AppState> {
         agent_service,
         board_service,
         repo_service,
+        user_service,
+        access_service,
+        authorization_service,
         pipeline_service,
         work_service,
         sfu,
+        git_root,
         // Release builds inject WIAB_VERSION (the git tag) so the reported
         // version matches the release; local builds fall back to Cargo.toml.
         version: option_env!("WIAB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
@@ -136,6 +182,48 @@ fn seed_default_organization(
         organization.id, project.id
     );
     Ok(())
+}
+
+/// Seeds an initial Owner user for the default org and logs a one-time access token, so
+/// there is a way to authenticate before the real identity provider exists. Re-seeded each
+/// boot because metadata is in-memory.
+fn seed_owner(
+    user_service: &UserApplicationService<InMemoryUserRepository>,
+    access_service: &AccessApplicationService<
+        InMemoryRoleAssignmentRepository,
+        InMemoryUserRepository,
+    >,
+) {
+    let owner = user_service
+        .create_user(CreateUserRequest {
+            kind: "human".to_owned(),
+            name: "Owner".to_owned(),
+            email: Some("owner@workinabox.local".to_owned()),
+        })
+        .expect("failed to seed owner user");
+    let user_id: UserId = owner.id.parse().expect("seeded owner id is valid");
+    access_service.grant_direct(
+        user_id,
+        Scope::Org(OrganizationId::from_number(1)),
+        Role::Owner,
+    );
+    let issued = user_service
+        .issue_token(
+            &owner.id,
+            IssueTokenRequest {
+                label: "bootstrap".to_owned(),
+                read_only: false,
+                repos: None,
+                orgs: None,
+                expires_at: None,
+            },
+        )
+        .expect("failed to issue bootstrap token")
+        .expect("seeded owner exists");
+    info!(
+        "seeded owner '{}' (Owner of O-1) — bootstrap access token: {}",
+        owner.id, issued.plaintext
+    );
 }
 
 fn log_loaded_meetings(meeting_service: &MeetingApplicationService<InMemoryMeetingRepository>) {
