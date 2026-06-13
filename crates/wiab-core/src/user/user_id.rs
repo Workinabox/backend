@@ -42,6 +42,7 @@ mod tests {
     #[test]
     fn renders_and_parses() {
         assert_eq!(UserId::from_number(7).to_string(), "U-7");
+        assert_eq!(UserId::from_number(7).number(), 7);
         assert_eq!("U-42".parse::<UserId>().unwrap(), UserId::from_number(42));
     }
 

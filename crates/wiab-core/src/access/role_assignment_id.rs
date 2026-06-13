@@ -42,6 +42,7 @@ mod tests {
     #[test]
     fn renders_and_parses() {
         assert_eq!(RoleAssignmentId::from_number(7).to_string(), "G-7");
+        assert_eq!(RoleAssignmentId::from_number(7).number(), 7);
         assert_eq!(
             "G-42".parse::<RoleAssignmentId>().unwrap(),
             RoleAssignmentId::from_number(42)

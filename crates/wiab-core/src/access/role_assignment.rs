@@ -47,3 +47,33 @@ impl RoleAssignment {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::organization::OrganizationId;
+
+    #[test]
+    fn exposes_fields_and_snapshot() {
+        let assignment = RoleAssignment::new(
+            RoleAssignmentId::from_number(3),
+            UserId::from_number(7),
+            Scope::Org(OrganizationId::from_number(1)),
+            Role::Admin,
+        );
+        assert_eq!(assignment.id(), RoleAssignmentId::from_number(3));
+        assert_eq!(assignment.user_id(), UserId::from_number(7));
+        assert_eq!(
+            assignment.scope(),
+            Scope::Org(OrganizationId::from_number(1))
+        );
+        assert_eq!(assignment.role(), Role::Admin);
+
+        let snapshot = assignment.snapshot();
+        assert_eq!(snapshot.id, "G-3");
+        assert_eq!(snapshot.user_id, "U-7");
+        assert_eq!(snapshot.scope_kind, "org");
+        assert_eq!(snapshot.scope_id, "O-1");
+        assert_eq!(snapshot.role, "admin");
+    }
+}

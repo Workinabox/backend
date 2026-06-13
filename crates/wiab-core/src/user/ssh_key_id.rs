@@ -41,4 +41,9 @@ mod tests {
         let id = SshKeyId::new();
         assert_eq!(id.to_string().parse::<SshKeyId>().unwrap(), id);
     }
+
+    #[test]
+    fn rejects_malformed() {
+        assert!("not-a-uuid".parse::<SshKeyId>().is_err());
+    }
 }

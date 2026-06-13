@@ -91,3 +91,86 @@ impl AccessToken {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::user::TokenScope;
+
+    fn token(expires_at: Option<&str>) -> AccessToken {
+        AccessToken::new(
+            TokenId::new(),
+            "ci".to_owned(),
+            "hash-xyz".to_owned(),
+            "wiab_pat_…abcd".to_owned(),
+            "2026-01-01T00:00:00Z".to_owned(),
+            expires_at.map(|value| value.to_owned()),
+            TokenScope::unrestricted(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rejects_blank_label_or_hash() {
+        assert_eq!(
+            AccessToken::new(
+                TokenId::new(),
+                "  ".to_owned(),
+                "h".to_owned(),
+                "d".to_owned(),
+                "t".to_owned(),
+                None,
+                TokenScope::unrestricted(),
+            )
+            .unwrap_err(),
+            UserError::EmptyTokenLabel
+        );
+        assert_eq!(
+            AccessToken::new(
+                TokenId::new(),
+                "label".to_owned(),
+                "  ".to_owned(),
+                "d".to_owned(),
+                "t".to_owned(),
+                None,
+                TokenScope::unrestricted(),
+            )
+            .unwrap_err(),
+            UserError::EmptyTokenHash
+        );
+    }
+
+    #[test]
+    fn matches_hash_and_exposes_scope_and_id() {
+        let token = token(None);
+        assert!(token.matches_hash("hash-xyz"));
+        assert!(!token.matches_hash("nope"));
+        assert!(!token.scope().is_read_only());
+        // id() is stable across calls.
+        assert_eq!(token.id(), token.id());
+    }
+
+    #[test]
+    fn expiry_compares_lexically() {
+        let token = token(Some("2026-06-01T00:00:00Z"));
+        assert!(token.is_expired("2026-07-01T00:00:00Z"));
+        assert!(!token.is_expired("2026-05-01T00:00:00Z"));
+        assert!(!self::token(None).is_expired("2030-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn mark_used_surfaces_in_snapshot() {
+        let mut token = token(None);
+        assert!(token.snapshot().last_used_at.is_none());
+        token.mark_used("2026-06-13T00:00:00Z".to_owned());
+        let snapshot = token.snapshot();
+        assert_eq!(
+            snapshot.last_used_at.as_deref(),
+            Some("2026-06-13T00:00:00Z")
+        );
+        assert_eq!(snapshot.label, "ci");
+        assert_eq!(snapshot.display, "wiab_pat_…abcd");
+        assert!(!snapshot.scope.read_only);
+        assert!(snapshot.scope.repos.is_none());
+    }
+}

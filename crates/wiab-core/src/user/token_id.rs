@@ -41,4 +41,9 @@ mod tests {
         let id = TokenId::new();
         assert_eq!(id.to_string().parse::<TokenId>().unwrap(), id);
     }
+
+    #[test]
+    fn rejects_malformed() {
+        assert!("not-a-uuid".parse::<TokenId>().is_err());
+    }
 }

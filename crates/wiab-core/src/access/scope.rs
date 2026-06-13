@@ -89,6 +89,22 @@ mod tests {
     }
 
     #[test]
+    fn exposes_kind_and_id_string_across_variants() {
+        let org = Scope::Org(OrganizationId::from_number(1));
+        assert_eq!(org.kind(), "org");
+        assert_eq!(org.id_string(), "O-1");
+
+        let project = Scope::parse("project", "P-2").unwrap();
+        assert_eq!(project, Scope::Project(ProjectId::from_number(2)));
+        assert_eq!(project.kind(), "project");
+        assert_eq!(project.id_string(), "P-2");
+
+        let repo = Scope::Repo(RepoId::from_number(3));
+        assert_eq!(repo.kind(), "repo");
+        assert_eq!(repo.id_string(), "R-3");
+    }
+
+    #[test]
     fn parses_from_kind_and_id() {
         assert_eq!(
             Scope::parse("org", "O-1").unwrap(),

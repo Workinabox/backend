@@ -50,8 +50,15 @@ mod tests {
     #[test]
     fn round_trips_and_defaults_private() {
         assert_eq!(Visibility::default(), Visibility::Private);
+        assert_eq!(
+            "private".parse::<Visibility>().unwrap(),
+            Visibility::Private
+        );
         assert_eq!("public".parse::<Visibility>().unwrap(), Visibility::Public);
+        assert_eq!(Visibility::Private.to_string(), "private");
+        assert_eq!(Visibility::Public.to_string(), "public");
         assert!(Visibility::Public.is_public());
+        assert!(!Visibility::Private.is_public());
         assert!("internal".parse::<Visibility>().is_err());
     }
 }

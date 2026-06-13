@@ -165,6 +165,37 @@ mod tests {
     }
 
     #[test]
+    fn exposes_identity_fields() {
+        let human = user();
+        assert_eq!(human.id(), UserId::from_number(1));
+        assert_eq!(human.kind(), UserKind::Human);
+        assert_eq!(human.name(), "Ada");
+        assert!(human.agent_id().is_none());
+
+        let agent = User::new(
+            UserId::from_number(2),
+            UserKind::Agent,
+            "bot".to_owned(),
+            None,
+            Some(AgentId::from_number(9)),
+        )
+        .unwrap();
+        assert_eq!(agent.kind(), UserKind::Agent);
+        assert_eq!(agent.agent_id(), Some(AgentId::from_number(9)));
+    }
+
+    #[test]
+    fn token_by_hash_mut_marks_use() {
+        let mut user = user();
+        user.add_token(token("h"));
+        user.token_by_hash_mut("h")
+            .unwrap()
+            .mark_used("2026-06-13T00:00:00Z".to_owned());
+        assert!(user.snapshot().tokens[0].last_used_at.is_some());
+        assert!(user.token_by_hash_mut("nope").is_none());
+    }
+
+    #[test]
     fn resolves_login_by_key_fingerprint() {
         let mut user = user();
         let key = key("laptop", "SHA256:abc");

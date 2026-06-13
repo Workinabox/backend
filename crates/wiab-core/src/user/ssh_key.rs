@@ -57,3 +57,54 @@ impl SshKey {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> SshKey {
+        SshKey::new(
+            SshKeyId::new(),
+            "laptop".to_owned(),
+            "ssh-ed25519 AAAA".to_owned(),
+            "SHA256:abc".to_owned(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rejects_blank_label_or_empty_key() {
+        assert_eq!(
+            SshKey::new(
+                SshKeyId::new(),
+                "  ".to_owned(),
+                "k".to_owned(),
+                "f".to_owned()
+            )
+            .unwrap_err(),
+            UserError::EmptySshKeyLabel
+        );
+        assert_eq!(
+            SshKey::new(
+                SshKeyId::new(),
+                "label".to_owned(),
+                "  ".to_owned(),
+                "f".to_owned()
+            )
+            .unwrap_err(),
+            UserError::EmptySshKey
+        );
+    }
+
+    #[test]
+    fn exposes_fields_and_snapshot() {
+        let key = key();
+        assert_eq!(key.id(), key.id());
+        assert_eq!(key.label(), "laptop");
+        assert_eq!(key.openssh_public_key(), "ssh-ed25519 AAAA");
+        assert_eq!(key.fingerprint(), "SHA256:abc");
+        let snapshot = key.snapshot();
+        assert_eq!(snapshot.label, "laptop");
+        assert_eq!(snapshot.fingerprint, "SHA256:abc");
+    }
+}
