@@ -50,3 +50,48 @@ pub enum SaveError {
     #[error("repository backend error: {0}")]
     Backend(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_version_starts_at_zero() {
+        assert_eq!(Version::NEW.value(), 0);
+    }
+
+    #[test]
+    fn next_of_new_is_one() {
+        assert_eq!(Version::NEW.next().value(), 1);
+    }
+
+    #[test]
+    fn next_increments() {
+        assert_eq!(Version::from_value(41).next().value(), 42);
+    }
+
+    #[test]
+    fn from_value_value_round_trip() {
+        assert_eq!(Version::from_value(7).value(), 7);
+    }
+
+    #[test]
+    fn repo_error_displays_backend() {
+        assert_eq!(
+            RepoError::Backend("boom".to_owned()).to_string(),
+            "repository backend error: boom"
+        );
+    }
+
+    #[test]
+    fn save_error_displays_conflict_and_backend() {
+        assert_eq!(
+            SaveError::Conflict.to_string(),
+            "version conflict: the aggregate was modified concurrently"
+        );
+        assert_eq!(
+            SaveError::Backend("boom".to_owned()).to_string(),
+            "repository backend error: boom"
+        );
+    }
+}

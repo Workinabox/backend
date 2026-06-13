@@ -238,4 +238,25 @@ mod tests {
         .unwrap();
         assert_eq!(work.snapshot().project_id, "P-7");
     }
+
+    #[test]
+    fn from_persistence_round_trips_with_dones() {
+        let fulfilled = Done::from_persistence(DoneId::new(), "tests pass".to_owned(), true);
+        let pending = Done::from_persistence(DoneId::new(), "docs written".to_owned(), false);
+        let work = Work::from_persistence(
+            WorkId::from_number(3),
+            ProjectId::from_number(5),
+            "Ship".to_owned(),
+            "desc".to_owned(),
+            vec![fulfilled, pending],
+        );
+        assert_eq!(work.id(), WorkId::from_number(3));
+        assert_eq!(work.project_id(), ProjectId::from_number(5));
+        assert_eq!(work.title(), "Ship");
+        assert_eq!(work.description(), "desc");
+        assert_eq!(work.dones().len(), 2);
+        assert!(!work.is_done());
+        assert_eq!(work.snapshot().dones.len(), 2);
+        assert!(!work.snapshot().is_done);
+    }
 }
