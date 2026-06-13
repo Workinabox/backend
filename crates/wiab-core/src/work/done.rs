@@ -20,6 +20,15 @@ impl Done {
         })
     }
 
+    /// Rebuild a `Done` from persisted state (used by repository implementations).
+    pub fn from_persistence(id: DoneId, criterion: String, fulfilled: bool) -> Self {
+        Self {
+            id,
+            criterion,
+            fulfilled,
+        }
+    }
+
     pub fn id(&self) -> DoneId {
         self.id
     }
@@ -80,5 +89,18 @@ mod tests {
         assert_eq!(view.id, done.id().to_string());
         assert_eq!(view.criterion, "ship it");
         assert!(view.fulfilled);
+    }
+
+    #[test]
+    fn from_persistence_round_trips() {
+        let id = DoneId::new();
+        let fulfilled = Done::from_persistence(id, "tests pass".to_owned(), true);
+        assert_eq!(fulfilled.id(), id);
+        assert_eq!(fulfilled.criterion(), "tests pass");
+        assert!(fulfilled.is_fulfilled());
+
+        let unfulfilled = Done::from_persistence(DoneId::new(), "docs".to_owned(), false);
+        assert_eq!(unfulfilled.criterion(), "docs");
+        assert!(!unfulfilled.is_fulfilled());
     }
 }

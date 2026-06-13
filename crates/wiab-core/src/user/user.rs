@@ -37,8 +37,43 @@ impl User {
         })
     }
 
+    /// Reconstitute a user from persisted state (used by repository implementations).
+    /// Bypasses validation: the data was already validated when first created.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persistence(
+        id: UserId,
+        kind: UserKind,
+        name: String,
+        email: Option<String>,
+        agent_id: Option<AgentId>,
+        ssh_keys: Vec<SshKey>,
+        tokens: Vec<AccessToken>,
+    ) -> User {
+        Self {
+            id,
+            kind,
+            name,
+            email,
+            agent_id,
+            ssh_keys,
+            tokens,
+        }
+    }
+
     pub fn id(&self) -> UserId {
         self.id
+    }
+
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
+
+    pub fn ssh_keys(&self) -> &[SshKey] {
+        &self.ssh_keys
+    }
+
+    pub fn tokens(&self) -> &[AccessToken] {
+        &self.tokens
     }
 
     pub fn kind(&self) -> UserKind {
@@ -232,5 +267,48 @@ mod tests {
         // The hash must never appear in the snapshot.
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(!json.contains("secret-hash"));
+    }
+
+    #[test]
+    fn from_persistence_round_trips_with_credentials_and_some_fields() {
+        let key = key("laptop", "SHA256:abc");
+        let key_id = key.id();
+        let token = token("hash-1");
+        let token_id = token.id();
+        let user = User::from_persistence(
+            UserId::from_number(4),
+            UserKind::Agent,
+            "bot".to_owned(),
+            Some("bot@example.com".to_owned()),
+            Some(AgentId::from_number(9)),
+            vec![key],
+            vec![token],
+        );
+        assert_eq!(user.id(), UserId::from_number(4));
+        assert_eq!(user.kind(), UserKind::Agent);
+        assert_eq!(user.name(), "bot");
+        assert_eq!(user.email(), Some("bot@example.com"));
+        assert_eq!(user.agent_id(), Some(AgentId::from_number(9)));
+        assert_eq!(user.ssh_keys().len(), 1);
+        assert_eq!(user.ssh_keys()[0].id(), key_id);
+        assert_eq!(user.tokens().len(), 1);
+        assert_eq!(user.tokens()[0].id(), token_id);
+    }
+
+    #[test]
+    fn from_persistence_round_trips_with_none_fields() {
+        let user = User::from_persistence(
+            UserId::from_number(5),
+            UserKind::Human,
+            "Ada".to_owned(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(user.email().is_none());
+        assert!(user.agent_id().is_none());
+        assert!(user.ssh_keys().is_empty());
+        assert!(user.tokens().is_empty());
     }
 }

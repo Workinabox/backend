@@ -10,6 +10,7 @@ use wiab_core::{
         ParticipantKind,
     },
     meeting_traits::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
+    repository::{SaveError, Version},
 };
 
 use crate::{
@@ -47,15 +48,16 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         }
     }
 
-    pub fn list_meetings(&self) -> Vec<MeetingSnapshot> {
+    pub async fn list_meetings(&self) -> anyhow::Result<Vec<MeetingSnapshot>> {
         let mut meetings = self
             .meeting_repository
             .list()
+            .await?
             .into_iter()
             .map(|meeting| meeting.snapshot())
             .collect::<Vec<_>>();
         meetings.sort_by(|left, right| left.title.cmp(&right.title));
-        meetings
+        Ok(meetings)
     }
 
     pub async fn create_meeting(
@@ -65,24 +67,30 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         let _guard = self.mutation_guard.lock().await;
         let meeting = build_meeting_from_request(request, self.clock.as_ref())?;
         let snapshot = meeting.snapshot();
-        self.meeting_repository.save(meeting);
+        self.meeting_repository.save(meeting, Version::NEW).await?;
         Ok(snapshot)
     }
 
-    pub fn meeting_snapshot(&self, meeting_id: &str) -> Option<MeetingSnapshot> {
-        self.meeting_repository
+    pub async fn meeting_snapshot(
+        &self,
+        meeting_id: &str,
+    ) -> anyhow::Result<Option<MeetingSnapshot>> {
+        Ok(self
+            .meeting_repository
             .get(meeting_id)
-            .map(|meeting| meeting.snapshot())
+            .await?
+            .map(|(meeting, _)| meeting.snapshot()))
     }
 
-    pub fn validate_join(
+    pub async fn validate_join(
         &self,
         meeting_id: &str,
         participant_id: &str,
     ) -> anyhow::Result<MeetingSnapshot> {
-        let meeting = self
+        let (meeting, _) = self
             .meeting_repository
             .get(meeting_id)
+            .await?
             .ok_or_else(|| anyhow!("meeting '{}' not found", meeting_id))?;
         meeting.require_active()?;
         meeting.require_participant(participant_id)?;
@@ -97,7 +105,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
     ) -> anyhow::Result<Vec<MeetingClientEvent>> {
         let text = normalize_required(text, "transcript text")?;
         let _guard = self.mutation_guard.lock().await;
-        let mut meeting = self.require_active_meeting(meeting_id)?;
+        let (mut meeting, version) = self.require_active_meeting(meeting_id).await?;
         meeting.require_human_participant(participant_id)?;
         if is_recent_agent_echo(&meeting, &text) {
             info!(
@@ -142,7 +150,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
                         "agent reply generation failed meeting='{}' participant='{}' err={}",
                         meeting.meeting_id, agent.participant_id, err
                     );
-                    self.meeting_repository.save(meeting);
+                    self.persist(meeting, version).await?;
                     return Ok(events);
                 }
             };
@@ -183,7 +191,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
             }
         }
 
-        self.meeting_repository.save(meeting);
+        self.persist(meeting, version).await?;
         Ok(events)
     }
 
@@ -193,7 +201,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         participant_id: &str,
     ) -> anyhow::Result<Vec<MeetingClientEvent>> {
         let _guard = self.mutation_guard.lock().await;
-        let mut meeting = self.require_active_meeting(meeting_id)?;
+        let (mut meeting, version) = self.require_active_meeting(meeting_id).await?;
         let ended_at = self.now();
         meeting.end(ended_at.clone(), participant_id)?;
 
@@ -211,7 +219,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
             }
         };
 
-        self.meeting_repository.save(meeting.clone());
+        self.persist(meeting.clone(), version).await?;
 
         let mut events = vec![MeetingClientEvent::MeetingEnded {
             meeting_id: meeting.meeting_id.clone(),
@@ -228,13 +236,25 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         Ok(events)
     }
 
-    fn require_active_meeting(&self, meeting_id: &str) -> anyhow::Result<Meeting> {
-        let meeting = self
+    async fn require_active_meeting(&self, meeting_id: &str) -> anyhow::Result<(Meeting, Version)> {
+        let (meeting, version) = self
             .meeting_repository
             .get(meeting_id)
+            .await?
             .ok_or_else(|| anyhow!("meeting '{}' not found", meeting_id))?;
         meeting.require_active()?;
-        Ok(meeting)
+        Ok((meeting, version))
+    }
+
+    /// Persist a meeting under its loaded version. All meeting mutations are serialized by
+    /// `mutation_guard`, so a conflict only arises against another process; surface it as an
+    /// error rather than retrying, since the mutation has side effects (speech, minutes).
+    async fn persist(&self, meeting: Meeting, expected: Version) -> anyhow::Result<()> {
+        match self.meeting_repository.save(meeting, expected).await {
+            Ok(_) => Ok(()),
+            Err(SaveError::Conflict) => Err(anyhow!("meeting was modified concurrently")),
+            Err(SaveError::Backend(error)) => Err(anyhow!(error)),
+        }
     }
 
     fn now(&self) -> String {
@@ -420,36 +440,49 @@ mod tests {
         meeting_traits::{
             Clock, FloorRequestCandidate, MeetingIntelligence, SpeechClip, SpeechSynthesisError,
         },
+        repository::RepoError,
     };
 
     #[derive(Default, Clone)]
     struct TestMeetingRepository {
-        meetings: Arc<std::sync::RwLock<HashMap<String, Meeting>>>,
+        meetings: Arc<std::sync::RwLock<HashMap<String, (Meeting, u64)>>>,
     }
 
     impl MeetingRepository for TestMeetingRepository {
-        fn save(&self, meeting: Meeting) {
-            self.meetings
+        async fn save(&self, meeting: Meeting, expected: Version) -> Result<Version, SaveError> {
+            let mut meetings = self
+                .meetings
                 .write()
-                .expect("test repository write lock poisoned")
-                .insert(meeting.meeting_id.clone(), meeting);
+                .expect("test repository write lock poisoned");
+            let current = meetings
+                .get(&meeting.meeting_id)
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            meetings.insert(meeting.meeting_id.clone(), (meeting, next.value()));
+            Ok(next)
         }
 
-        fn get(&self, meeting_id: &str) -> Option<Meeting> {
-            self.meetings
+        async fn get(&self, meeting_id: &str) -> Result<Option<(Meeting, Version)>, RepoError> {
+            Ok(self
+                .meetings
                 .read()
                 .expect("test repository read lock poisoned")
                 .get(meeting_id)
-                .cloned()
+                .map(|(meeting, version)| (meeting.clone(), Version::from_value(*version))))
         }
 
-        fn list(&self) -> Vec<Meeting> {
-            self.meetings
+        async fn list(&self) -> Result<Vec<Meeting>, RepoError> {
+            Ok(self
+                .meetings
                 .read()
                 .expect("test repository read lock poisoned")
                 .values()
-                .cloned()
-                .collect()
+                .map(|(meeting, _)| meeting.clone())
+                .collect())
         }
     }
 

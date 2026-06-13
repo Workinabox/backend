@@ -118,7 +118,6 @@ pub fn router(state: AppState) -> Router {
             put(update_pipeline).get(get_pipeline),
         )
         .route("/works/{work_id}", get(get_work).put(update_work))
-        .route("/works/{work_id}/children", post(add_child))
         .route("/works/{work_id}/dones", post(add_done))
         .route(
             "/works/{work_id}/dones/{done_id}/fulfill",
@@ -145,8 +144,16 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     })
 }
 
-async fn list_meetings(State(state): State<AppState>) -> Json<Vec<MeetingSnapshot>> {
-    Json(state.meeting_service.list_meetings())
+async fn list_meetings(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<MeetingSnapshot>>, (StatusCode, String)> {
+    Ok(Json(
+        state
+            .meeting_service
+            .list_meetings()
+            .await
+            .map_err(bad_request)?,
+    ))
 }
 
 async fn create_meeting(
@@ -161,8 +168,16 @@ async fn create_meeting(
         .map_err(|err| (axum::http::StatusCode::BAD_REQUEST, err.to_string()))
 }
 
-async fn list_organizations(State(state): State<AppState>) -> Json<Vec<OrganizationSnapshot>> {
-    Json(state.organization_service.list_organizations())
+async fn list_organizations(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<OrganizationSnapshot>>, (StatusCode, String)> {
+    Ok(Json(
+        state
+            .organization_service
+            .list_organizations()
+            .await
+            .map_err(bad_request)?,
+    ))
 }
 
 async fn create_organization(
@@ -172,6 +187,7 @@ async fn create_organization(
     state
         .organization_service
         .create_organization(request)
+        .await
         .map(Json)
         .map_err(bad_request)
 }
@@ -183,6 +199,7 @@ async fn get_organization(
     match state
         .organization_service
         .organization_snapshot(&organization_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -198,6 +215,7 @@ async fn update_organization(
     match state
         .organization_service
         .update_organization(&organization_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -212,6 +230,7 @@ async fn list_projects(
     match state
         .project_service
         .list_projects(&organization_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshots) => Ok(Json(snapshots)),
@@ -227,6 +246,7 @@ async fn create_project(
     match state
         .project_service
         .create_project(&organization_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -241,6 +261,7 @@ async fn get_project(
     match state
         .project_service
         .project_snapshot(&project_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -256,6 +277,7 @@ async fn update_project(
     match state
         .project_service
         .update_project(&project_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -270,6 +292,7 @@ async fn list_agents(
     match state
         .agent_service
         .list_agents(&organization_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshots) => Ok(Json(snapshots)),
@@ -285,6 +308,7 @@ async fn create_agent(
     let snapshot = match state
         .agent_service
         .create_agent(&organization_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => snapshot,
@@ -297,12 +321,15 @@ async fn create_agent(
     let user = state
         .user_service
         .provision_agent_user(snapshot.name.clone(), agent_id)
+        .await
         .map_err(bad_request)?;
     let user_id: UserId = user.id.parse().map_err(internal)?;
     let org: OrganizationId = snapshot.organization_id.parse().map_err(internal)?;
     state
         .access_service
-        .grant_direct(user_id, Scope::Org(org), Role::Write);
+        .grant_direct(user_id, Scope::Org(org), Role::Write)
+        .await
+        .map_err(bad_request)?;
 
     Ok(Json(snapshot))
 }
@@ -314,6 +341,7 @@ async fn get_agent(
     match state
         .agent_service
         .agent_snapshot(&agent_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -329,6 +357,7 @@ async fn update_agent(
     match state
         .agent_service
         .update_agent(&agent_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -343,6 +372,7 @@ async fn list_boards(
     match state
         .board_service
         .list_boards(&project_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshots) => Ok(Json(snapshots)),
@@ -358,6 +388,7 @@ async fn create_board(
     match state
         .board_service
         .create_board(&project_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -372,6 +403,7 @@ async fn get_board(
     match state
         .board_service
         .board_snapshot(&board_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -387,6 +419,7 @@ async fn update_board(
     match state
         .board_service
         .update_board(&board_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -401,6 +434,7 @@ async fn list_repos(
     match state
         .repo_service
         .list_repos(&project_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshots) => Ok(Json(snapshots)),
@@ -417,6 +451,7 @@ async fn create_repo(
     let Some(project) = state
         .project_service
         .project_snapshot(&project_id)
+        .await
         .map_err(bad_request)?
     else {
         return Err(not_found("project", &project_id));
@@ -425,6 +460,7 @@ async fn create_repo(
     match state
         .repo_service
         .create_repo(&project_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -439,6 +475,7 @@ async fn get_repo(
     match state
         .repo_service
         .repo_snapshot(&repo_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -454,6 +491,7 @@ async fn update_repo(
     match state
         .repo_service
         .update_repo(&repo_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -476,26 +514,13 @@ struct CommitsQuery {
     limit: Option<usize>,
 }
 
-/// Runs a blocking repo-service call (libgit2 touches disk) off the async runtime,
-/// mapping a join failure to 500 and a domain error to 400.
-async fn run_blocking<T, F>(f: F) -> Result<Option<T>, (StatusCode, String)>
-where
-    T: Send + 'static,
-    F: FnOnce() -> anyhow::Result<Option<T>> + Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(internal)?
-        .map_err(bad_request)
-}
-
 async fn list_branches(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
 ) -> Result<Json<Vec<BranchSnapshot>>, (StatusCode, String)> {
     let service = state.repo_service.clone();
     let id = repo_id.clone();
-    match run_blocking(move || service.list_branches(&id)).await? {
+    match service.list_branches(&id).await.map_err(bad_request)? {
         Some(branches) => Ok(Json(branches)),
         None => Err(not_found("repo", &repo_id)),
     }
@@ -509,7 +534,11 @@ async fn list_repo_files(
     let service = state.repo_service.clone();
     let dir = query.path.unwrap_or_default();
     let (id, branch_param) = (repo_id.clone(), branch);
-    match run_blocking(move || service.list_files(&id, &branch_param, &dir)).await? {
+    match service
+        .list_files(&id, &branch_param, &dir)
+        .await
+        .map_err(bad_request)?
+    {
         Some(entries) => Ok(Json(entries)),
         None => Err(not_found("repo", &repo_id)),
     }
@@ -522,7 +551,11 @@ async fn read_repo_file(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let service = state.repo_service.clone();
     let (id, branch_param, path) = (repo_id.clone(), branch, query.path);
-    match run_blocking(move || service.read_file(&id, &branch_param, &path)).await? {
+    match service
+        .read_file(&id, &branch_param, &path)
+        .await
+        .map_err(bad_request)?
+    {
         Some(bytes) => Ok((
             [(header::CONTENT_TYPE, "application/octet-stream")],
             Bytes::from(bytes),
@@ -539,7 +572,11 @@ async fn list_repo_commits(
     let service = state.repo_service.clone();
     let limit = query.limit.unwrap_or(20).clamp(1, 1000);
     let (id, branch_param) = (repo_id.clone(), branch);
-    match run_blocking(move || service.recent_commits(&id, &branch_param, limit)).await? {
+    match service
+        .recent_commits(&id, &branch_param, limit)
+        .await
+        .map_err(bad_request)?
+    {
         Some(commits) => Ok(Json(commits)),
         None => Err(not_found("repo", &repo_id)),
     }
@@ -554,7 +591,11 @@ async fn create_commit(
     require_repo_role(&state, &repo_id, Operation::Write, &headers).await?;
     let service = state.repo_service.clone();
     let id = repo_id.clone();
-    match run_blocking(move || service.commit_changes(&id, request)).await? {
+    match service
+        .commit_changes(&id, request)
+        .await
+        .map_err(bad_request)?
+    {
         Some(commit) => Ok(Json(commit)),
         None => Err(not_found("repo", &repo_id)),
     }
@@ -594,10 +635,7 @@ async fn authenticate(
         return Err(unauthorized());
     };
     let user_service = state.user_service.clone();
-    match tokio::task::spawn_blocking(move || user_service.resolve_token(&token))
-        .await
-        .map_err(internal)?
-    {
+    match user_service.resolve_token(&token).await.map_err(internal)? {
         Some(resolved) => Ok(resolved),
         None => Err(unauthorized()),
     }
@@ -610,9 +648,7 @@ async fn require_owner(
 ) -> Result<UserId, (StatusCode, String)> {
     let (user, _scope) = authenticate(state, headers).await?;
     let access = state.access_service.clone();
-    let is_owner = tokio::task::spawn_blocking(move || access.is_owner(user))
-        .await
-        .map_err(internal)?;
+    let is_owner = access.is_owner(user).await.map_err(internal)?;
     if is_owner { Ok(user) } else { Err(forbidden()) }
 }
 
@@ -629,7 +665,8 @@ async fn require_org_role(
         .parse()
         .map_err(|_| not_found("organization", org_id))?;
     let authz = state.authorization_service.clone();
-    let allowed = tokio::task::spawn_blocking(move || authz.authorize_org(user, org, operation))
+    let allowed = authz
+        .authorize_org(user, org, operation)
         .await
         .map_err(internal)?;
     if allowed { Ok(()) } else { Err(forbidden()) }
@@ -646,10 +683,10 @@ async fn require_repo_role(
     let (user, scope) = authenticate(state, headers).await?;
     let repo: RepoId = repo_id.parse().map_err(|_| not_found("repo", repo_id))?;
     let authz = state.authorization_service.clone();
-    let allowed =
-        tokio::task::spawn_blocking(move || authz.authorize(user, repo, operation, Some(&scope)))
-            .await
-            .map_err(internal)?;
+    let allowed = authz
+        .authorize(user, repo, operation, Some(&scope))
+        .await
+        .map_err(internal)?;
     if allowed { Ok(()) } else { Err(forbidden()) }
 }
 
@@ -680,9 +717,7 @@ async fn require_self_or_owner(
         return Ok(());
     }
     let access = state.access_service.clone();
-    let is_owner = tokio::task::spawn_blocking(move || access.is_owner(user))
-        .await
-        .map_err(internal)?;
+    let is_owner = access.is_owner(user).await.map_err(internal)?;
     if is_owner { Ok(()) } else { Err(forbidden()) }
 }
 
@@ -695,7 +730,11 @@ async fn set_repo_visibility(
     require_repo_role(&state, &repo_id, Operation::Administer, &headers).await?;
     let service = state.repo_service.clone();
     let id = repo_id.clone();
-    match run_blocking(move || service.set_visibility(&id, request)).await? {
+    match service
+        .set_visibility(&id, request)
+        .await
+        .map_err(bad_request)?
+    {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("repo", &repo_id)),
     }
@@ -707,9 +746,7 @@ async fn list_users(
 ) -> Result<Json<Vec<UserSnapshot>>, (StatusCode, String)> {
     require_owner(&state, &headers).await?;
     let service = state.user_service.clone();
-    let users = tokio::task::spawn_blocking(move || service.list_users())
-        .await
-        .map_err(internal)?;
+    let users = service.list_users().await.map_err(internal)?;
     Ok(Json(users))
 }
 
@@ -720,10 +757,7 @@ async fn create_user(
 ) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
     require_owner(&state, &headers).await?;
     let service = state.user_service.clone();
-    let snapshot = tokio::task::spawn_blocking(move || service.create_user(request))
-        .await
-        .map_err(internal)?
-        .map_err(bad_request)?;
+    let snapshot = service.create_user(request).await.map_err(bad_request)?;
     Ok(Json(snapshot))
 }
 
@@ -735,7 +769,7 @@ async fn get_user(
     require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
-    match run_blocking(move || service.user_snapshot(&id)).await? {
+    match service.user_snapshot(&id).await.map_err(bad_request)? {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("user", &user_id)),
     }
@@ -750,7 +784,11 @@ async fn add_ssh_key(
     require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
-    match run_blocking(move || service.add_ssh_key(&id, request)).await? {
+    match service
+        .add_ssh_key(&id, request)
+        .await
+        .map_err(bad_request)?
+    {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("user", &user_id)),
     }
@@ -764,7 +802,11 @@ async fn remove_ssh_key(
     require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
-    match run_blocking(move || service.remove_ssh_key(&id, &key_id)).await? {
+    match service
+        .remove_ssh_key(&id, &key_id)
+        .await
+        .map_err(bad_request)?
+    {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("user", &user_id)),
     }
@@ -779,7 +821,11 @@ async fn issue_token(
     require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
-    match run_blocking(move || service.issue_token(&id, request)).await? {
+    match service
+        .issue_token(&id, request)
+        .await
+        .map_err(bad_request)?
+    {
         Some(issued) => Ok(Json(issued)),
         None => Err(not_found("user", &user_id)),
     }
@@ -793,7 +839,11 @@ async fn revoke_token(
     require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
-    match run_blocking(move || service.revoke_token(&id, &token_id)).await? {
+    match service
+        .revoke_token(&id, &token_id)
+        .await
+        .map_err(bad_request)?
+    {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("user", &user_id)),
     }
@@ -805,9 +855,7 @@ async fn list_role_assignments(
 ) -> Result<Json<Vec<RoleAssignmentSnapshot>>, (StatusCode, String)> {
     require_owner(&state, &headers).await?;
     let service = state.access_service.clone();
-    let assignments = tokio::task::spawn_blocking(move || service.list_assignments())
-        .await
-        .map_err(internal)?;
+    let assignments = service.list_assignments().await.map_err(internal)?;
     Ok(Json(assignments))
 }
 
@@ -818,7 +866,7 @@ async fn grant_role(
 ) -> Result<Json<RoleAssignmentSnapshot>, (StatusCode, String)> {
     require_owner(&state, &headers).await?;
     let service = state.access_service.clone();
-    match run_blocking(move || service.grant(request)).await? {
+    match service.grant(request).await.map_err(bad_request)? {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("user", "grantee")),
     }
@@ -832,10 +880,7 @@ async fn revoke_role(
     require_owner(&state, &headers).await?;
     let service = state.access_service.clone();
     let id = assignment_id.clone();
-    let removed = tokio::task::spawn_blocking(move || service.revoke(&id))
-        .await
-        .map_err(internal)?
-        .map_err(bad_request)?;
+    let removed = service.revoke(&id).await.map_err(bad_request)?;
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -850,6 +895,7 @@ async fn list_pipelines(
     match state
         .pipeline_service
         .list_pipelines(&project_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshots) => Ok(Json(snapshots)),
@@ -865,6 +911,7 @@ async fn create_pipeline(
     match state
         .pipeline_service
         .create_pipeline(&project_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -879,6 +926,7 @@ async fn get_pipeline(
     match state
         .pipeline_service
         .pipeline_snapshot(&pipeline_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -894,6 +942,7 @@ async fn update_pipeline(
     match state
         .pipeline_service
         .update_pipeline(&pipeline_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -908,6 +957,7 @@ async fn list_project_works(
     match state
         .work_service
         .list_works_by_project(&project_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshots) => Ok(Json(snapshots)),
@@ -923,6 +973,7 @@ async fn create_work(
     match state
         .work_service
         .create_work(&project_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -937,6 +988,7 @@ async fn get_work(
     match state
         .work_service
         .work_snapshot(&work_id)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
@@ -952,23 +1004,12 @@ async fn update_work(
     match state
         .work_service
         .update_work(&work_id, request)
+        .await
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("work", &work_id)),
     }
-}
-
-async fn add_child(
-    State(state): State<AppState>,
-    Path(work_id): Path<String>,
-    Json(request): Json<CreateWorkRequest>,
-) -> Result<Json<WorkSnapshot>, (StatusCode, String)> {
-    state
-        .work_service
-        .add_child(&work_id, request)
-        .map(Json)
-        .map_err(bad_request)
 }
 
 async fn add_done(
@@ -979,6 +1020,7 @@ async fn add_done(
     state
         .work_service
         .add_done(&work_id, request)
+        .await
         .map(Json)
         .map_err(bad_request)
 }
@@ -990,6 +1032,7 @@ async fn fulfill_done(
     state
         .work_service
         .fulfill_done(&work_id, &done_id)
+        .await
         .map(Json)
         .map_err(bad_request)
 }
@@ -1001,6 +1044,7 @@ async fn unfulfill_done(
     state
         .work_service
         .unfulfill_done(&work_id, &done_id)
+        .await
         .map(Json)
         .map_err(bad_request)
 }

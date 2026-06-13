@@ -223,11 +223,11 @@ async fn authorize_git(
     headers: &HeaderMap,
 ) -> Result<(), Response> {
     if operation == Operation::Read {
-        let repo_service = state.repo_service.clone();
         let rid = repo.to_string();
-        let visibility = tokio::task::spawn_blocking(move || repo_service.repo_visibility(&rid))
+        let visibility = state
+            .repo_service
+            .repo_visibility(&rid)
             .await
-            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?
             .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()).into_response())?;
         if visibility == Some(Visibility::Public) {
             return Ok(());
@@ -237,21 +237,20 @@ async fn authorize_git(
     let Some(token) = basic_auth_password(headers) else {
         return Err(unauthorized());
     };
-    let user_service = state.user_service.clone();
-    let Some((user, scope)) =
-        tokio::task::spawn_blocking(move || user_service.resolve_token(&token))
-            .await
-            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?
+    let Some((user, scope)) = state
+        .user_service
+        .resolve_token(&token)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?
     else {
         return Err(unauthorized());
     };
 
-    let authorization = state.authorization_service.clone();
-    let allowed = tokio::task::spawn_blocking(move || {
-        authorization.authorize(user, repo, operation, Some(&scope))
-    })
-    .await
-    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?;
+    let allowed = state
+        .authorization_service
+        .authorize(user, repo, operation, Some(&scope))
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?;
     if allowed { Ok(()) } else { Err(forbidden()) }
 }
 

@@ -1,21 +1,22 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use anyhow::anyhow;
 use wiab_core::organization::{
     Organization, OrganizationId, OrganizationNumbering, OrganizationRepository,
     OrganizationSnapshot,
 };
+use wiab_core::repository::{SaveError, Version};
 
 use crate::organization_requests::{CreateOrganizationRequest, UpdateOrganizationRequest};
 
 /// Orchestrates use cases over the `Organization` aggregate.
 ///
-/// Methods are synchronous: `Organization` has no external/async collaborators, so a plain
-/// `std::sync::Mutex` guard held across each load-mutate-save is enough to prevent lost
-/// updates.
+/// Methods are async and fallible: persistence may be remote. Lost updates are prevented by
+/// optimistic concurrency — a mutation loads the aggregate with its version, applies the
+/// change, and retries when a concurrent save advanced the version in between.
 pub struct OrganizationApplicationService<R: OrganizationRepository> {
     organization_repository: R,
     numbering: Arc<dyn OrganizationNumbering>,
-    mutation_guard: Mutex<()>,
 }
 
 impl<R: OrganizationRepository> OrganizationApplicationService<R> {
@@ -23,20 +24,19 @@ impl<R: OrganizationRepository> OrganizationApplicationService<R> {
         Self {
             organization_repository,
             numbering,
-            mutation_guard: Mutex::new(()),
         }
     }
 
-    pub fn list_organizations(&self) -> Vec<OrganizationSnapshot> {
-        let mut organizations = self.organization_repository.list();
+    pub async fn list_organizations(&self) -> anyhow::Result<Vec<OrganizationSnapshot>> {
+        let mut organizations = self.organization_repository.list().await?;
         organizations.sort_by_key(|organization| organization.id().number());
-        organizations
+        Ok(organizations
             .into_iter()
             .map(|organization| organization.snapshot())
-            .collect()
+            .collect())
     }
 
-    pub fn organization_snapshot(
+    pub async fn organization_snapshot(
         &self,
         organization_id: &str,
     ) -> anyhow::Result<Option<OrganizationSnapshot>> {
@@ -44,42 +44,47 @@ impl<R: OrganizationRepository> OrganizationApplicationService<R> {
         Ok(self
             .organization_repository
             .get(&id)
-            .map(|organization| organization.snapshot()))
+            .await?
+            .map(|(organization, _)| organization.snapshot()))
     }
 
-    pub fn create_organization(
+    pub async fn create_organization(
         &self,
         request: CreateOrganizationRequest,
     ) -> anyhow::Result<OrganizationSnapshot> {
-        let _guard = self.lock();
         let organization =
             Organization::new(self.numbering.next(), request.name, request.description)?;
         let snapshot = organization.snapshot();
-        self.organization_repository.save(organization);
+        self.organization_repository
+            .save(organization, Version::NEW)
+            .await?;
         Ok(snapshot)
     }
 
     /// Returns `Ok(None)` when no organization with the given id exists.
-    pub fn update_organization(
+    pub async fn update_organization(
         &self,
         organization_id: &str,
         request: UpdateOrganizationRequest,
     ) -> anyhow::Result<Option<OrganizationSnapshot>> {
-        let _guard = self.lock();
         let id: OrganizationId = organization_id.parse()?;
-        let Some(mut organization) = self.organization_repository.get(&id) else {
-            return Ok(None);
-        };
-        organization.update(request.name, request.description)?;
-        let snapshot = organization.snapshot();
-        self.organization_repository.save(organization);
-        Ok(Some(snapshot))
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.mutation_guard
-            .lock()
-            .expect("organization mutation guard poisoned")
+        loop {
+            let Some((mut organization, version)) = self.organization_repository.get(&id).await?
+            else {
+                return Ok(None);
+            };
+            organization.update(request.name.clone(), request.description.clone())?;
+            let snapshot = organization.snapshot();
+            match self
+                .organization_repository
+                .save(organization, version)
+                .await
+            {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 }
 
@@ -89,36 +94,59 @@ mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use wiab_core::repository::{RepoError, SaveError, Version};
+
     use super::*;
 
     #[derive(Default)]
     struct TestOrganizationRepository {
-        organizations: RwLock<HashMap<OrganizationId, Organization>>,
+        organizations: RwLock<HashMap<OrganizationId, (Organization, u64)>>,
     }
 
     impl OrganizationRepository for TestOrganizationRepository {
-        fn save(&self, organization: Organization) {
-            self.organizations
+        async fn save(
+            &self,
+            organization: Organization,
+            expected: Version,
+        ) -> Result<Version, SaveError> {
+            let mut organizations = self
+                .organizations
                 .write()
-                .expect("test repository write lock poisoned")
-                .insert(organization.id(), organization);
+                .expect("test repository write lock poisoned");
+            let current = organizations
+                .get(&organization.id())
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            organizations.insert(organization.id(), (organization, next.value()));
+            Ok(next)
         }
 
-        fn get(&self, id: &OrganizationId) -> Option<Organization> {
-            self.organizations
+        async fn get(
+            &self,
+            id: &OrganizationId,
+        ) -> Result<Option<(Organization, Version)>, RepoError> {
+            Ok(self
+                .organizations
                 .read()
                 .expect("test repository read lock poisoned")
                 .get(id)
-                .cloned()
+                .map(|(organization, version)| {
+                    (organization.clone(), Version::from_value(*version))
+                }))
         }
 
-        fn list(&self) -> Vec<Organization> {
-            self.organizations
+        async fn list(&self) -> Result<Vec<Organization>, RepoError> {
+            Ok(self
+                .organizations
                 .read()
                 .expect("test repository read lock poisoned")
                 .values()
-                .cloned()
-                .collect()
+                .map(|(organization, _)| organization.clone())
+                .collect())
         }
     }
 
@@ -140,7 +168,7 @@ mod tests {
         )
     }
 
-    fn create(
+    async fn create(
         service: &OrganizationApplicationService<TestOrganizationRepository>,
         name: &str,
     ) -> OrganizationSnapshot {
@@ -149,18 +177,19 @@ mod tests {
                 name: name.to_owned(),
                 description: String::new(),
             })
+            .await
             .expect("organization should be created")
     }
 
-    #[test]
-    fn create_organization_assigns_incrementing_ids() {
+    #[tokio::test]
+    async fn create_organization_assigns_incrementing_ids() {
         let service = service();
-        assert_eq!(create(&service, "First").id, "O-1");
-        assert_eq!(create(&service, "Second").id, "O-2");
+        assert_eq!(create(&service, "First").await.id, "O-1");
+        assert_eq!(create(&service, "Second").await.id, "O-2");
     }
 
-    #[test]
-    fn create_organization_rejects_empty_name() {
+    #[tokio::test]
+    async fn create_organization_rejects_empty_name() {
         let service = service();
         assert!(
             service
@@ -168,47 +197,61 @@ mod tests {
                     name: "  ".to_owned(),
                     description: String::new(),
                 })
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn list_organizations_sorts_by_id() {
+    #[tokio::test]
+    async fn list_organizations_sorts_by_id() {
         let service = service();
-        create(&service, "First");
-        create(&service, "Second");
-        service.organization_repository.save(
-            Organization::new(
-                OrganizationId::from_number(10),
-                "Tenth".to_owned(),
-                String::new(),
+        create(&service, "First").await;
+        create(&service, "Second").await;
+        service
+            .organization_repository
+            .save(
+                Organization::new(
+                    OrganizationId::from_number(10),
+                    "Tenth".to_owned(),
+                    String::new(),
+                )
+                .unwrap(),
+                Version::NEW,
             )
-            .unwrap(),
-        );
+            .await
+            .unwrap();
         let ids = service
             .list_organizations()
+            .await
+            .unwrap()
             .into_iter()
             .map(|organization| organization.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["O-1", "O-2", "O-10"]);
     }
 
-    #[test]
-    fn organization_snapshot_returns_none_for_missing() {
+    #[tokio::test]
+    async fn organization_snapshot_returns_none_for_missing() {
         let service = service();
-        assert!(service.organization_snapshot("O-9").unwrap().is_none());
+        assert!(
+            service
+                .organization_snapshot("O-9")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
-    #[test]
-    fn organization_snapshot_rejects_malformed_id() {
+    #[tokio::test]
+    async fn organization_snapshot_rejects_malformed_id() {
         let service = service();
-        assert!(service.organization_snapshot("bogus").is_err());
+        assert!(service.organization_snapshot("bogus").await.is_err());
     }
 
-    #[test]
-    fn update_organization_replaces_fields() {
+    #[tokio::test]
+    async fn update_organization_replaces_fields() {
         let service = service();
-        let organization = create(&service, "Gos & co");
+        let organization = create(&service, "Gos & co").await;
         let updated = service
             .update_organization(
                 &organization.id,
@@ -217,6 +260,7 @@ mod tests {
                     description: "rockets".to_owned(),
                 },
             )
+            .await
             .unwrap()
             .expect("organization should exist");
         assert_eq!(updated.name, "Acme");
@@ -224,13 +268,14 @@ mod tests {
 
         let reloaded = service
             .organization_snapshot(&organization.id)
+            .await
             .unwrap()
             .expect("organization should exist");
         assert_eq!(reloaded.name, "Acme");
     }
 
-    #[test]
-    fn update_missing_organization_returns_none() {
+    #[tokio::test]
+    async fn update_missing_organization_returns_none() {
         let service = service();
         let result = service
             .update_organization(
@@ -240,14 +285,15 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn update_organization_rejects_empty_name() {
+    #[tokio::test]
+    async fn update_organization_rejects_empty_name() {
         let service = service();
-        let organization = create(&service, "Gos & co");
+        let organization = create(&service, "Gos & co").await;
         assert!(
             service
                 .update_organization(
@@ -257,6 +303,7 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }

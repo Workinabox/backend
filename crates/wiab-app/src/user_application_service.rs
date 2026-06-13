@@ -1,9 +1,11 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use anyhow::anyhow;
 use wiab_core::agent::AgentId;
 use wiab_core::meeting_traits::Clock;
 use wiab_core::organization::OrganizationId;
 use wiab_core::repo::RepoId;
+use wiab_core::repository::{SaveError, Version};
 use wiab_core::user::{
     AccessToken, KeyFingerprinter, SshKey, SshKeyId, TokenFactory, TokenHasher, TokenId,
     TokenScope, User, UserError, UserId, UserKind, UserNumbering, UserRepository, UserSnapshot,
@@ -22,7 +24,6 @@ pub struct UserApplicationService<U: UserRepository> {
     token_hasher: Arc<dyn TokenHasher>,
     fingerprinter: Arc<dyn KeyFingerprinter>,
     clock: Arc<dyn Clock>,
-    mutation_guard: Mutex<()>,
 }
 
 impl<U: UserRepository> UserApplicationService<U> {
@@ -41,23 +42,25 @@ impl<U: UserRepository> UserApplicationService<U> {
             token_hasher,
             fingerprinter,
             clock,
-            mutation_guard: Mutex::new(()),
         }
     }
 
-    pub fn list_users(&self) -> Vec<UserSnapshot> {
-        let mut users = self.user_repository.list();
+    pub async fn list_users(&self) -> anyhow::Result<Vec<UserSnapshot>> {
+        let mut users = self.user_repository.list().await?;
         users.sort_by_key(|user| user.id().number());
-        users.iter().map(|user| user.snapshot()).collect()
+        Ok(users.iter().map(|user| user.snapshot()).collect())
     }
 
-    pub fn user_snapshot(&self, user_id: &str) -> anyhow::Result<Option<UserSnapshot>> {
+    pub async fn user_snapshot(&self, user_id: &str) -> anyhow::Result<Option<UserSnapshot>> {
         let id: UserId = user_id.parse()?;
-        Ok(self.user_repository.get(&id).map(|user| user.snapshot()))
+        Ok(self
+            .user_repository
+            .get(&id)
+            .await?
+            .map(|(user, _)| user.snapshot()))
     }
 
-    pub fn create_user(&self, request: CreateUserRequest) -> anyhow::Result<UserSnapshot> {
-        let _guard = self.lock();
+    pub async fn create_user(&self, request: CreateUserRequest) -> anyhow::Result<UserSnapshot> {
         let kind: UserKind = request.kind.parse()?;
         let user = User::new(
             self.numbering.next(),
@@ -67,17 +70,16 @@ impl<U: UserRepository> UserApplicationService<U> {
             None,
         )?;
         let snapshot = user.snapshot();
-        self.user_repository.save(user);
+        self.user_repository.save(user, Version::NEW).await?;
         Ok(snapshot)
     }
 
     /// Creates the `User` identity for an agent. Used when an agent is created.
-    pub fn provision_agent_user(
+    pub async fn provision_agent_user(
         &self,
         name: String,
         agent_id: AgentId,
     ) -> anyhow::Result<UserSnapshot> {
-        let _guard = self.lock();
         let user = User::new(
             self.numbering.next(),
             UserKind::Agent,
@@ -86,140 +88,172 @@ impl<U: UserRepository> UserApplicationService<U> {
             Some(agent_id),
         )?;
         let snapshot = user.snapshot();
-        self.user_repository.save(user);
+        self.user_repository.save(user, Version::NEW).await?;
         Ok(snapshot)
     }
 
-    pub fn add_ssh_key(
+    pub async fn add_ssh_key(
         &self,
         user_id: &str,
         request: AddSshKeyRequest,
     ) -> anyhow::Result<Option<UserSnapshot>> {
-        let _guard = self.lock();
         let id: UserId = user_id.parse()?;
-        let Some(mut user) = self.user_repository.get(&id) else {
-            return Ok(None);
-        };
-        let fingerprint = self
-            .fingerprinter
-            .fingerprint(&request.public_key)
-            .ok_or_else(|| UserError::InvalidSshKey(request.label.clone()))?;
-        let key = SshKey::new(
-            SshKeyId::new(),
-            request.label,
-            request.public_key,
-            fingerprint,
-        )?;
-        user.add_ssh_key(key);
-        let snapshot = user.snapshot();
-        self.user_repository.save(user);
-        Ok(Some(snapshot))
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            let fingerprint = self
+                .fingerprinter
+                .fingerprint(&request.public_key)
+                .ok_or_else(|| UserError::InvalidSshKey(request.label.clone()))?;
+            let key = SshKey::new(
+                SshKeyId::new(),
+                request.label.clone(),
+                request.public_key.clone(),
+                fingerprint,
+            )?;
+            user.add_ssh_key(key);
+            let snapshot = user.snapshot();
+            match self.user_repository.save(user, version).await {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 
-    pub fn remove_ssh_key(
+    pub async fn remove_ssh_key(
         &self,
         user_id: &str,
         key_id: &str,
     ) -> anyhow::Result<Option<UserSnapshot>> {
-        let _guard = self.lock();
         let id: UserId = user_id.parse()?;
         let key_id: SshKeyId = key_id.parse()?;
-        let Some(mut user) = self.user_repository.get(&id) else {
-            return Ok(None);
-        };
-        user.remove_ssh_key(&key_id)?;
-        let snapshot = user.snapshot();
-        self.user_repository.save(user);
-        Ok(Some(snapshot))
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            user.remove_ssh_key(&key_id)?;
+            let snapshot = user.snapshot();
+            match self.user_repository.save(user, version).await {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 
-    pub fn issue_token(
+    pub async fn issue_token(
         &self,
         user_id: &str,
         request: IssueTokenRequest,
     ) -> anyhow::Result<Option<IssuedTokenSnapshot>> {
-        let _guard = self.lock();
         let id: UserId = user_id.parse()?;
-        let Some(mut user) = self.user_repository.get(&id) else {
-            return Ok(None);
-        };
-        let scope = parse_scope(&request)?;
-        let generated = self.token_factory.generate();
-        let hash = self.token_hasher.hash(&generated.plaintext);
-        let token = AccessToken::new(
-            TokenId::new(),
-            request.label,
-            hash,
-            generated.display,
-            self.clock.now_rfc3339(),
-            request.expires_at,
-            scope,
-        )?;
-        let snapshot = token.snapshot();
-        user.add_token(token);
-        self.user_repository.save(user);
-        Ok(Some(IssuedTokenSnapshot {
-            token: snapshot,
-            plaintext: generated.plaintext,
-        }))
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            let scope = parse_scope(&request)?;
+            let generated = self.token_factory.generate();
+            let hash = self.token_hasher.hash(&generated.plaintext);
+            let token = AccessToken::new(
+                TokenId::new(),
+                request.label.clone(),
+                hash,
+                generated.display,
+                self.clock.now_rfc3339(),
+                request.expires_at.clone(),
+                scope,
+            )?;
+            let snapshot = token.snapshot();
+            user.add_token(token);
+            match self.user_repository.save(user, version).await {
+                Ok(_) => {
+                    return Ok(Some(IssuedTokenSnapshot {
+                        token: snapshot,
+                        plaintext: generated.plaintext,
+                    }));
+                }
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 
-    pub fn revoke_token(
+    pub async fn revoke_token(
         &self,
         user_id: &str,
         token_id: &str,
     ) -> anyhow::Result<Option<UserSnapshot>> {
-        let _guard = self.lock();
         let id: UserId = user_id.parse()?;
         let token_id: TokenId = token_id.parse()?;
-        let Some(mut user) = self.user_repository.get(&id) else {
-            return Ok(None);
-        };
-        user.revoke_token(&token_id)?;
-        let snapshot = user.snapshot();
-        self.user_repository.save(user);
-        Ok(Some(snapshot))
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            user.revoke_token(&token_id)?;
+            let snapshot = user.snapshot();
+            match self.user_repository.save(user, version).await {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 
     /// Resolves a presented token plaintext to its owning user and scope, rejecting an
     /// expired token, and records the use. Used by the HTTPS auth path.
-    pub fn resolve_token(&self, plaintext: &str) -> Option<(UserId, TokenScope)> {
-        let _guard = self.lock();
+    pub async fn resolve_token(
+        &self,
+        plaintext: &str,
+    ) -> anyhow::Result<Option<(UserId, TokenScope)>> {
         let hash = self.token_hasher.hash(plaintext);
-        let now = self.clock.now_rfc3339();
-        for mut user in self.user_repository.list() {
+        let id = {
+            let users = self.user_repository.list().await?;
+            users
+                .into_iter()
+                .find(|user| user.token_by_hash(&hash).is_some())
+                .map(|user| user.id())
+        };
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            let now = self.clock.now_rfc3339();
             let Some((expired, scope)) = user
                 .token_by_hash(&hash)
                 .map(|token| (token.is_expired(&now), token.scope().clone()))
             else {
-                continue;
+                return Ok(None);
             };
             if expired {
-                return None;
+                return Ok(None);
             }
             let user_id = user.id();
             if let Some(token) = user.token_by_hash_mut(&hash) {
                 token.mark_used(now.clone());
             }
-            self.user_repository.save(user);
-            return Some((user_id, scope));
+            match self.user_repository.save(user, version).await {
+                Ok(_) => return Ok(Some((user_id, scope))),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
         }
-        None
     }
 
     /// Resolves an SSH key fingerprint to its owning user. Used by the SSH auth path.
-    pub fn resolve_user_by_fingerprint(&self, fingerprint: &str) -> Option<UserId> {
-        self.user_repository
-            .list()
+    pub async fn resolve_user_by_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> anyhow::Result<Option<UserId>> {
+        let users = self.user_repository.list().await?;
+        Ok(users
             .into_iter()
             .find(|user| user.ssh_key_by_fingerprint(fingerprint).is_some())
-            .map(|user| user.id())
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.mutation_guard
-            .lock()
-            .expect("user mutation guard poisoned")
+            .map(|user| user.id()))
     }
 }
 
@@ -249,23 +283,45 @@ mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use wiab_core::repository::{RepoError, SaveError, Version};
     use wiab_core::user::GeneratedToken;
 
     use super::*;
 
     #[derive(Default)]
     struct TestUserRepository {
-        users: RwLock<HashMap<UserId, User>>,
+        users: RwLock<HashMap<UserId, (User, u64)>>,
     }
     impl UserRepository for TestUserRepository {
-        fn save(&self, user: User) {
-            self.users.write().unwrap().insert(user.id(), user);
+        async fn save(&self, user: User, expected: Version) -> Result<Version, SaveError> {
+            let mut users = self.users.write().unwrap();
+            let current = users
+                .get(&user.id())
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            users.insert(user.id(), (user, next.value()));
+            Ok(next)
         }
-        fn get(&self, id: &UserId) -> Option<User> {
-            self.users.read().unwrap().get(id).cloned()
+        async fn get(&self, id: &UserId) -> Result<Option<(User, Version)>, RepoError> {
+            Ok(self
+                .users
+                .read()
+                .unwrap()
+                .get(id)
+                .map(|(user, version)| (user.clone(), Version::from_value(*version))))
         }
-        fn list(&self) -> Vec<User> {
-            self.users.read().unwrap().values().cloned().collect()
+        async fn list(&self) -> Result<Vec<User>, RepoError> {
+            Ok(self
+                .users
+                .read()
+                .unwrap()
+                .values()
+                .map(|(user, _)| user.clone())
+                .collect())
         }
     }
 
@@ -325,28 +381,29 @@ mod tests {
         )
     }
 
-    fn create(service: &UserApplicationService<TestUserRepository>) -> String {
+    async fn create(service: &UserApplicationService<TestUserRepository>) -> String {
         service
             .create_user(CreateUserRequest {
                 kind: "human".to_owned(),
                 name: "Ada".to_owned(),
                 email: None,
             })
+            .await
             .unwrap()
             .id
     }
 
-    #[test]
-    fn create_user_assigns_incrementing_ids() {
+    #[tokio::test]
+    async fn create_user_assigns_incrementing_ids() {
         let service = service();
-        assert_eq!(create(&service), "U-1");
-        assert_eq!(create(&service), "U-2");
+        assert_eq!(create(&service).await, "U-1");
+        assert_eq!(create(&service).await, "U-2");
     }
 
-    #[test]
-    fn add_key_then_resolve_by_fingerprint() {
+    #[tokio::test]
+    async fn add_key_then_resolve_by_fingerprint() {
         let service = service();
-        let user_id = create(&service);
+        let user_id = create(&service).await;
         service
             .add_ssh_key(
                 &user_id,
@@ -355,16 +412,20 @@ mod tests {
                     public_key: "ssh-ed25519 AAAA".to_owned(),
                 },
             )
+            .await
             .unwrap()
             .unwrap();
-        let resolved = service.resolve_user_by_fingerprint("fp(ssh-ed25519 AAAA)");
+        let resolved = service
+            .resolve_user_by_fingerprint("fp(ssh-ed25519 AAAA)")
+            .await
+            .unwrap();
         assert_eq!(resolved.map(|id| id.to_string()), Some(user_id));
     }
 
-    #[test]
-    fn add_invalid_key_is_rejected() {
+    #[tokio::test]
+    async fn add_invalid_key_is_rejected() {
         let service = service();
-        let user_id = create(&service);
+        let user_id = create(&service).await;
         assert!(
             service
                 .add_ssh_key(
@@ -374,14 +435,15 @@ mod tests {
                         public_key: "invalid".to_owned(),
                     },
                 )
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn issue_token_returns_plaintext_once_then_resolves() {
+    #[tokio::test]
+    async fn issue_token_returns_plaintext_once_then_resolves() {
         let service = service();
-        let user_id = create(&service);
+        let user_id = create(&service).await;
         let issued = service
             .issue_token(
                 &user_id,
@@ -393,22 +455,27 @@ mod tests {
                     expires_at: None,
                 },
             )
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(issued.plaintext, "wiab_pat_PLAINTEXT");
         // The snapshot must not leak the plaintext or hash.
         assert!(!issued.token.display.contains("PLAINTEXT"));
 
-        let (resolved, scope) = service.resolve_token("wiab_pat_PLAINTEXT").unwrap();
+        let (resolved, scope) = service
+            .resolve_token("wiab_pat_PLAINTEXT")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.to_string(), user_id);
         assert!(scope.is_read_only());
-        assert!(service.resolve_token("wrong").is_none());
+        assert!(service.resolve_token("wrong").await.unwrap().is_none());
     }
 
-    #[test]
-    fn expired_token_does_not_resolve() {
+    #[tokio::test]
+    async fn expired_token_does_not_resolve() {
         let service = service();
-        let user_id = create(&service);
+        let user_id = create(&service).await;
         service
             .issue_token(
                 &user_id,
@@ -420,7 +487,14 @@ mod tests {
                     expires_at: Some("2020-01-01T00:00:00Z".to_owned()),
                 },
             )
+            .await
             .unwrap();
-        assert!(service.resolve_token("wiab_pat_PLAINTEXT").is_none());
+        assert!(
+            service
+                .resolve_token("wiab_pat_PLAINTEXT")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

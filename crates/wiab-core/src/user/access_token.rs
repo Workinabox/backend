@@ -45,8 +45,57 @@ impl AccessToken {
         })
     }
 
+    /// Reconstitute an access token from persisted state (used by repository
+    /// implementations). Bypasses validation: the data was already validated on creation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persistence(
+        id: TokenId,
+        label: String,
+        hash: String,
+        display: String,
+        created_at: String,
+        expires_at: Option<String>,
+        last_used_at: Option<String>,
+        scope: TokenScope,
+    ) -> AccessToken {
+        Self {
+            id,
+            label,
+            hash,
+            display,
+            created_at,
+            expires_at,
+            last_used_at,
+            scope,
+        }
+    }
+
     pub fn id(&self) -> TokenId {
         self.id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    pub fn expires_at(&self) -> Option<&str> {
+        self.expires_at.as_deref()
+    }
+
+    pub fn last_used_at(&self) -> Option<&str> {
+        self.last_used_at.as_deref()
     }
 
     pub fn matches_hash(&self, hash: &str) -> bool {
@@ -172,5 +221,44 @@ mod tests {
         assert_eq!(snapshot.display, "wiab_pat_…abcd");
         assert!(!snapshot.scope.read_only);
         assert!(snapshot.scope.repos.is_none());
+    }
+
+    #[test]
+    fn from_persistence_round_trips_with_some_timestamps() {
+        let id = TokenId::new();
+        let token = AccessToken::from_persistence(
+            id,
+            "ci".to_owned(),
+            "hash-xyz".to_owned(),
+            "wiab_pat_…abcd".to_owned(),
+            "2026-01-01T00:00:00Z".to_owned(),
+            Some("2026-12-31T00:00:00Z".to_owned()),
+            Some("2026-06-01T00:00:00Z".to_owned()),
+            TokenScope::unrestricted(),
+        );
+        assert_eq!(token.id(), id);
+        assert_eq!(token.label(), "ci");
+        assert_eq!(token.hash(), "hash-xyz");
+        assert_eq!(token.display(), "wiab_pat_…abcd");
+        assert_eq!(token.created_at(), "2026-01-01T00:00:00Z");
+        assert_eq!(token.expires_at(), Some("2026-12-31T00:00:00Z"));
+        assert_eq!(token.last_used_at(), Some("2026-06-01T00:00:00Z"));
+        assert!(!token.scope().is_read_only());
+    }
+
+    #[test]
+    fn from_persistence_round_trips_with_none_timestamps() {
+        let token = AccessToken::from_persistence(
+            TokenId::new(),
+            "ci".to_owned(),
+            "hash-xyz".to_owned(),
+            "wiab_pat_…abcd".to_owned(),
+            "2026-01-01T00:00:00Z".to_owned(),
+            None,
+            None,
+            TokenScope::unrestricted(),
+        );
+        assert!(token.expires_at().is_none());
+        assert!(token.last_used_at().is_none());
     }
 }

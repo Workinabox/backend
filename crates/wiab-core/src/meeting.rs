@@ -5,6 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::meeting_traits::FloorRequestCandidate;
+use crate::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -620,10 +621,11 @@ fn trim_ascii_punctuation(token: &str) -> &str {
     token.trim_matches(|character: char| character.is_ascii_punctuation())
 }
 
+#[allow(async_fn_in_trait)]
 pub trait MeetingRepository: Send + Sync + 'static {
-    fn save(&self, meeting: Meeting);
-    fn get(&self, meeting_id: &str) -> Option<Meeting>;
-    fn list(&self) -> Vec<Meeting>;
+    async fn save(&self, meeting: Meeting, expected: Version) -> Result<Version, SaveError>;
+    async fn get(&self, meeting_id: &str) -> Result<Option<(Meeting, Version)>, RepoError>;
+    async fn list(&self) -> Result<Vec<Meeting>, RepoError>;
 }
 
 #[cfg(test)]

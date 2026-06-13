@@ -33,6 +33,21 @@ impl SshKey {
         })
     }
 
+    /// Reconstitute an SSH key from persisted state (used by repository implementations).
+    pub fn from_persistence(
+        id: SshKeyId,
+        label: String,
+        openssh_public_key: String,
+        fingerprint: String,
+    ) -> SshKey {
+        Self {
+            id,
+            label,
+            openssh_public_key,
+            fingerprint,
+        }
+    }
+
     pub fn id(&self) -> SshKeyId {
         self.id
     }
@@ -106,5 +121,20 @@ mod tests {
         let snapshot = key.snapshot();
         assert_eq!(snapshot.label, "laptop");
         assert_eq!(snapshot.fingerprint, "SHA256:abc");
+    }
+
+    #[test]
+    fn from_persistence_round_trips() {
+        let id = SshKeyId::new();
+        let key = SshKey::from_persistence(
+            id,
+            "server".to_owned(),
+            "ssh-ed25519 BBBB".to_owned(),
+            "SHA256:def".to_owned(),
+        );
+        assert_eq!(key.id(), id);
+        assert_eq!(key.label(), "server");
+        assert_eq!(key.openssh_public_key(), "ssh-ed25519 BBBB");
+        assert_eq!(key.fingerprint(), "SHA256:def");
     }
 }

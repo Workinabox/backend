@@ -9,38 +9,23 @@ use wiab_app::{
 };
 
 use crate::{
-    InMemoryAgentRepository, InMemoryBoardRepository, InMemoryMeetingRepository,
-    InMemoryOrganizationRepository, InMemoryPipelineRepository, InMemoryProjectRepository,
-    InMemoryRepoRepository, InMemoryRoleAssignmentRepository, InMemoryUserRepository,
-    InMemoryWorkRepository, Sfu,
+    AgentRepo, BoardRepo, InMemoryMeetingRepository, OrganizationRepo, PipelineRepo, ProjectRepo,
+    RepoRepo, RoleAssignmentRepo, Sfu, UserRepo, WorkRepo,
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
-    pub organization_service: Arc<OrganizationApplicationService<InMemoryOrganizationRepository>>,
-    pub project_service:
-        Arc<ProjectApplicationService<InMemoryProjectRepository, InMemoryOrganizationRepository>>,
-    pub agent_service:
-        Arc<AgentApplicationService<InMemoryAgentRepository, InMemoryOrganizationRepository>>,
-    pub board_service:
-        Arc<BoardApplicationService<InMemoryBoardRepository, InMemoryProjectRepository>>,
-    pub repo_service:
-        Arc<RepoApplicationService<InMemoryRepoRepository, InMemoryProjectRepository>>,
-    pub user_service: Arc<UserApplicationService<InMemoryUserRepository>>,
-    pub access_service:
-        Arc<AccessApplicationService<InMemoryRoleAssignmentRepository, InMemoryUserRepository>>,
-    pub authorization_service: Arc<
-        AuthorizationService<
-            InMemoryRoleAssignmentRepository,
-            InMemoryRepoRepository,
-            InMemoryProjectRepository,
-        >,
-    >,
-    pub pipeline_service:
-        Arc<PipelineApplicationService<InMemoryPipelineRepository, InMemoryProjectRepository>>,
-    pub work_service:
-        Arc<WorkApplicationService<InMemoryWorkRepository, InMemoryProjectRepository>>,
+    pub organization_service: Arc<OrganizationApplicationService<OrganizationRepo>>,
+    pub project_service: Arc<ProjectApplicationService<ProjectRepo, OrganizationRepo>>,
+    pub agent_service: Arc<AgentApplicationService<AgentRepo, OrganizationRepo>>,
+    pub board_service: Arc<BoardApplicationService<BoardRepo, ProjectRepo>>,
+    pub repo_service: Arc<RepoApplicationService<RepoRepo, ProjectRepo>>,
+    pub user_service: Arc<UserApplicationService<UserRepo>>,
+    pub access_service: Arc<AccessApplicationService<RoleAssignmentRepo, UserRepo>>,
+    pub authorization_service: Arc<AuthorizationService<RoleAssignmentRepo, RepoRepo, ProjectRepo>>,
+    pub pipeline_service: Arc<PipelineApplicationService<PipelineRepo, ProjectRepo>>,
+    pub work_service: Arc<WorkApplicationService<WorkRepo, ProjectRepo>>,
     pub sfu: Arc<Sfu>,
     /// Filesystem root under which hosted bare git repos live (`<root>/R-<n>.git`).
     /// Used by the Smart-HTTP handlers to locate the repo to serve.

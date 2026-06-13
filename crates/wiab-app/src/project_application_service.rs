@@ -1,22 +1,24 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use anyhow::anyhow;
 use wiab_core::organization::{OrganizationId, OrganizationRepository};
 use wiab_core::project::{
     Project, ProjectId, ProjectNumbering, ProjectRepository, ProjectSnapshot,
 };
+use wiab_core::repository::{SaveError, Version};
 
 use crate::project_requests::{CreateProjectRequest, UpdateProjectRequest};
 
 /// Orchestrates use cases over the `Project` aggregate.
 ///
-/// Methods are synchronous: `Project` has no external/async collaborators, so a plain
-/// `std::sync::Mutex` guard held across each load-mutate-save is enough to prevent lost
-/// updates. Holds the organization repository to verify the parent organization exists.
+/// Methods are async and fallible: persistence may be remote. Lost updates are prevented by
+/// optimistic concurrency — a mutation loads the aggregate with its version, applies the
+/// change, and retries when a concurrent save advanced the version in between. Holds the
+/// organization repository to verify the parent organization exists.
 pub struct ProjectApplicationService<P: ProjectRepository, O: OrganizationRepository> {
     project_repository: P,
     organization_repository: O,
     numbering: Arc<dyn ProjectNumbering>,
-    mutation_guard: Mutex<()>,
 }
 
 impl<P: ProjectRepository, O: OrganizationRepository> ProjectApplicationService<P, O> {
@@ -29,22 +31,22 @@ impl<P: ProjectRepository, O: OrganizationRepository> ProjectApplicationService<
             project_repository,
             organization_repository,
             numbering,
-            mutation_guard: Mutex::new(()),
         }
     }
 
     /// Returns `Ok(None)` when no organization with the given id exists.
-    pub fn list_projects(
+    pub async fn list_projects(
         &self,
         organization_id: &str,
     ) -> anyhow::Result<Option<Vec<ProjectSnapshot>>> {
         let id: OrganizationId = organization_id.parse()?;
-        if self.organization_repository.get(&id).is_none() {
+        if self.organization_repository.get(&id).await?.is_none() {
             return Ok(None);
         }
         let mut projects = self
             .project_repository
             .list()
+            .await?
             .into_iter()
             .filter(|project| project.organization_id() == id)
             .collect::<Vec<_>>();
@@ -57,52 +59,53 @@ impl<P: ProjectRepository, O: OrganizationRepository> ProjectApplicationService<
         ))
     }
 
-    pub fn project_snapshot(&self, project_id: &str) -> anyhow::Result<Option<ProjectSnapshot>> {
+    pub async fn project_snapshot(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Option<ProjectSnapshot>> {
         let id: ProjectId = project_id.parse()?;
         Ok(self
             .project_repository
             .get(&id)
-            .map(|project| project.snapshot()))
+            .await?
+            .map(|(project, _)| project.snapshot()))
     }
 
     /// Returns `Ok(None)` when no organization with the given id exists.
-    pub fn create_project(
+    pub async fn create_project(
         &self,
         organization_id: &str,
         request: CreateProjectRequest,
     ) -> anyhow::Result<Option<ProjectSnapshot>> {
-        let _guard = self.lock();
         let id: OrganizationId = organization_id.parse()?;
-        if self.organization_repository.get(&id).is_none() {
+        if self.organization_repository.get(&id).await?.is_none() {
             return Ok(None);
         }
         let project = Project::new(self.numbering.next(), id, request.name, request.description)?;
         let snapshot = project.snapshot();
-        self.project_repository.save(project);
+        self.project_repository.save(project, Version::NEW).await?;
         Ok(Some(snapshot))
     }
 
     /// Returns `Ok(None)` when no project with the given id exists.
-    pub fn update_project(
+    pub async fn update_project(
         &self,
         project_id: &str,
         request: UpdateProjectRequest,
     ) -> anyhow::Result<Option<ProjectSnapshot>> {
-        let _guard = self.lock();
         let id: ProjectId = project_id.parse()?;
-        let Some(mut project) = self.project_repository.get(&id) else {
-            return Ok(None);
-        };
-        project.update(request.name, request.description)?;
-        let snapshot = project.snapshot();
-        self.project_repository.save(project);
-        Ok(Some(snapshot))
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.mutation_guard
-            .lock()
-            .expect("project mutation guard poisoned")
+        loop {
+            let Some((mut project, version)) = self.project_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            project.update(request.name.clone(), request.description.clone())?;
+            let snapshot = project.snapshot();
+            match self.project_repository.save(project, version).await {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
     }
 }
 
@@ -113,68 +116,102 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use wiab_core::organization::Organization;
+    use wiab_core::repository::{RepoError, SaveError, Version};
 
     use super::*;
 
     #[derive(Default)]
     struct TestProjectRepository {
-        projects: RwLock<HashMap<ProjectId, Project>>,
+        projects: RwLock<HashMap<ProjectId, (Project, u64)>>,
     }
 
     impl ProjectRepository for TestProjectRepository {
-        fn save(&self, project: Project) {
-            self.projects
+        async fn save(&self, project: Project, expected: Version) -> Result<Version, SaveError> {
+            let mut projects = self
+                .projects
                 .write()
-                .expect("test repository write lock poisoned")
-                .insert(project.id(), project);
+                .expect("test repository write lock poisoned");
+            let current = projects
+                .get(&project.id())
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            projects.insert(project.id(), (project, next.value()));
+            Ok(next)
         }
 
-        fn get(&self, id: &ProjectId) -> Option<Project> {
-            self.projects
+        async fn get(&self, id: &ProjectId) -> Result<Option<(Project, Version)>, RepoError> {
+            Ok(self
+                .projects
                 .read()
                 .expect("test repository read lock poisoned")
                 .get(id)
-                .cloned()
+                .map(|(project, version)| (project.clone(), Version::from_value(*version))))
         }
 
-        fn list(&self) -> Vec<Project> {
-            self.projects
+        async fn list(&self) -> Result<Vec<Project>, RepoError> {
+            Ok(self
+                .projects
                 .read()
                 .expect("test repository read lock poisoned")
                 .values()
-                .cloned()
-                .collect()
+                .map(|(project, _)| project.clone())
+                .collect())
         }
     }
 
     #[derive(Default)]
     struct TestOrganizationRepository {
-        organizations: RwLock<HashMap<OrganizationId, Organization>>,
+        organizations: RwLock<HashMap<OrganizationId, (Organization, u64)>>,
     }
 
     impl OrganizationRepository for TestOrganizationRepository {
-        fn save(&self, organization: Organization) {
-            self.organizations
+        async fn save(
+            &self,
+            organization: Organization,
+            expected: Version,
+        ) -> Result<Version, SaveError> {
+            let mut organizations = self
+                .organizations
                 .write()
-                .expect("test repository write lock poisoned")
-                .insert(organization.id(), organization);
+                .expect("test repository write lock poisoned");
+            let current = organizations
+                .get(&organization.id())
+                .map(|(_, version)| *version)
+                .unwrap_or(0);
+            if current != expected.value() {
+                return Err(SaveError::Conflict);
+            }
+            let next = expected.next();
+            organizations.insert(organization.id(), (organization, next.value()));
+            Ok(next)
         }
 
-        fn get(&self, id: &OrganizationId) -> Option<Organization> {
-            self.organizations
+        async fn get(
+            &self,
+            id: &OrganizationId,
+        ) -> Result<Option<(Organization, Version)>, RepoError> {
+            Ok(self
+                .organizations
                 .read()
                 .expect("test repository read lock poisoned")
                 .get(id)
-                .cloned()
+                .map(|(organization, version)| {
+                    (organization.clone(), Version::from_value(*version))
+                }))
         }
 
-        fn list(&self) -> Vec<Organization> {
-            self.organizations
+        async fn list(&self) -> Result<Vec<Organization>, RepoError> {
+            Ok(self
+                .organizations
                 .read()
                 .expect("test repository read lock poisoned")
                 .values()
-                .cloned()
-                .collect()
+                .map(|(organization, _)| organization.clone())
+                .collect())
         }
     }
 
@@ -197,7 +234,7 @@ mod tests {
         )
     }
 
-    fn seed_organization(
+    async fn seed_organization(
         service: &ProjectApplicationService<TestProjectRepository, TestOrganizationRepository>,
         number: u64,
     ) -> String {
@@ -208,11 +245,15 @@ mod tests {
         )
         .unwrap();
         let id = organization.id().to_string();
-        service.organization_repository.save(organization);
+        service
+            .organization_repository
+            .save(organization, Version::NEW)
+            .await
+            .unwrap();
         id
     }
 
-    fn create(
+    async fn create(
         service: &ProjectApplicationService<TestProjectRepository, TestOrganizationRepository>,
         organization_id: &str,
         name: &str,
@@ -225,28 +266,29 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .expect("organization id should be valid")
             .expect("organization should exist")
     }
 
-    #[test]
-    fn create_project_assigns_incrementing_ids() {
+    #[tokio::test]
+    async fn create_project_assigns_incrementing_ids() {
         let service = service();
-        let organization_id = seed_organization(&service, 1);
-        assert_eq!(create(&service, &organization_id, "First").id, "P-1");
-        assert_eq!(create(&service, &organization_id, "Second").id, "P-2");
+        let organization_id = seed_organization(&service, 1).await;
+        assert_eq!(create(&service, &organization_id, "First").await.id, "P-1");
+        assert_eq!(create(&service, &organization_id, "Second").await.id, "P-2");
     }
 
-    #[test]
-    fn create_project_records_organization_id() {
+    #[tokio::test]
+    async fn create_project_records_organization_id() {
         let service = service();
-        let organization_id = seed_organization(&service, 1);
-        let project = create(&service, &organization_id, "Workinabox");
+        let organization_id = seed_organization(&service, 1).await;
+        let project = create(&service, &organization_id, "Workinabox").await;
         assert_eq!(project.organization_id, organization_id);
     }
 
-    #[test]
-    fn create_project_under_missing_organization_returns_none() {
+    #[tokio::test]
+    async fn create_project_under_missing_organization_returns_none() {
         let service = service();
         let result = service
             .create_project(
@@ -256,12 +298,13 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn create_project_rejects_malformed_organization_id() {
+    #[tokio::test]
+    async fn create_project_rejects_malformed_organization_id() {
         let service = service();
         assert!(
             service
@@ -272,14 +315,15 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn create_project_rejects_empty_name() {
+    #[tokio::test]
+    async fn create_project_rejects_empty_name() {
         let service = service();
-        let organization_id = seed_organization(&service, 1);
+        let organization_id = seed_organization(&service, 1).await;
         assert!(
             service
                 .create_project(
@@ -289,30 +333,37 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }
 
-    #[test]
-    fn list_projects_partitions_by_organization() {
+    #[tokio::test]
+    async fn list_projects_partitions_by_organization() {
         let service = service();
-        let first_organization = seed_organization(&service, 1);
-        let second_organization = seed_organization(&service, 2);
-        create(&service, &first_organization, "First");
-        create(&service, &second_organization, "Second");
-        create(&service, &first_organization, "Third");
-        service.project_repository.save(
-            Project::new(
-                ProjectId::from_number(10),
-                OrganizationId::from_number(1),
-                "Tenth".to_owned(),
-                String::new(),
+        let first_organization = seed_organization(&service, 1).await;
+        let second_organization = seed_organization(&service, 2).await;
+        create(&service, &first_organization, "First").await;
+        create(&service, &second_organization, "Second").await;
+        create(&service, &first_organization, "Third").await;
+        service
+            .project_repository
+            .save(
+                Project::new(
+                    ProjectId::from_number(10),
+                    OrganizationId::from_number(1),
+                    "Tenth".to_owned(),
+                    String::new(),
+                )
+                .unwrap(),
+                Version::NEW,
             )
-            .unwrap(),
-        );
+            .await
+            .unwrap();
 
         let first_ids = service
             .list_projects(&first_organization)
+            .await
             .unwrap()
             .expect("organization should exist")
             .into_iter()
@@ -322,6 +373,7 @@ mod tests {
 
         let second_ids = service
             .list_projects(&second_organization)
+            .await
             .unwrap()
             .expect("organization should exist")
             .into_iter()
@@ -330,35 +382,35 @@ mod tests {
         assert_eq!(second_ids, vec!["P-2"]);
     }
 
-    #[test]
-    fn list_projects_for_missing_organization_returns_none() {
+    #[tokio::test]
+    async fn list_projects_for_missing_organization_returns_none() {
         let service = service();
-        assert!(service.list_projects("O-9").unwrap().is_none());
+        assert!(service.list_projects("O-9").await.unwrap().is_none());
     }
 
-    #[test]
-    fn list_projects_rejects_malformed_organization_id() {
+    #[tokio::test]
+    async fn list_projects_rejects_malformed_organization_id() {
         let service = service();
-        assert!(service.list_projects("bogus").is_err());
+        assert!(service.list_projects("bogus").await.is_err());
     }
 
-    #[test]
-    fn project_snapshot_returns_none_for_missing() {
+    #[tokio::test]
+    async fn project_snapshot_returns_none_for_missing() {
         let service = service();
-        assert!(service.project_snapshot("P-9").unwrap().is_none());
+        assert!(service.project_snapshot("P-9").await.unwrap().is_none());
     }
 
-    #[test]
-    fn project_snapshot_rejects_malformed_id() {
+    #[tokio::test]
+    async fn project_snapshot_rejects_malformed_id() {
         let service = service();
-        assert!(service.project_snapshot("bogus").is_err());
+        assert!(service.project_snapshot("bogus").await.is_err());
     }
 
-    #[test]
-    fn update_project_replaces_fields_but_not_organization() {
+    #[tokio::test]
+    async fn update_project_replaces_fields_but_not_organization() {
         let service = service();
-        let organization_id = seed_organization(&service, 1);
-        let project = create(&service, &organization_id, "Workinabox");
+        let organization_id = seed_organization(&service, 1).await;
+        let project = create(&service, &organization_id, "Workinabox").await;
         let updated = service
             .update_project(
                 &project.id,
@@ -367,6 +419,7 @@ mod tests {
                     description: "to the moon".to_owned(),
                 },
             )
+            .await
             .unwrap()
             .expect("project should exist");
         assert_eq!(updated.name, "Rocket");
@@ -375,13 +428,14 @@ mod tests {
 
         let reloaded = service
             .project_snapshot(&project.id)
+            .await
             .unwrap()
             .expect("project should exist");
         assert_eq!(reloaded.name, "Rocket");
     }
 
-    #[test]
-    fn update_missing_project_returns_none() {
+    #[tokio::test]
+    async fn update_missing_project_returns_none() {
         let service = service();
         let result = service
             .update_project(
@@ -391,15 +445,16 @@ mod tests {
                     description: String::new(),
                 },
             )
+            .await
             .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn update_project_rejects_empty_name() {
+    #[tokio::test]
+    async fn update_project_rejects_empty_name() {
         let service = service();
-        let organization_id = seed_organization(&service, 1);
-        let project = create(&service, &organization_id, "Workinabox");
+        let organization_id = seed_organization(&service, 1).await;
+        let project = create(&service, &organization_id, "Workinabox").await;
         assert!(
             service
                 .update_project(
@@ -409,6 +464,7 @@ mod tests {
                         description: String::new(),
                     },
                 )
+                .await
                 .is_err()
         );
     }

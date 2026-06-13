@@ -16,7 +16,9 @@ anyhow = "1.0.100"
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
 crc32fast = "1"
+deadpool-postgres = "0.14"
 flate2 = "1.0"
 futures-util = "0.3"
 git2 = "0.20"
@@ -25,6 +27,7 @@ mediasoup = "0.20"
 opus = "0.3"
 rand = "0.10"
 rcgen = "0.13"
+refinery = { version = "0.8", features = ["tokio-postgres"] }
 rstest = "0.26.1"
 russh = "0.61"
 rustls = { version = "0.23", features = ["ring"] }
@@ -34,6 +37,7 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18", features = ["v4"] }
@@ -46,6 +50,7 @@ wiab-inf = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
+clap = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }

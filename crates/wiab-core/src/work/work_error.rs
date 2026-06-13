@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::work::{DoneId, WorkId};
+use crate::work::DoneId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WorkError {
@@ -10,8 +10,6 @@ pub enum WorkError {
     EmptyCriterion,
     #[error("done '{0}' does not belong to this work")]
     DoneNotFound(DoneId),
-    #[error("work '{0}' already exists in this tree")]
-    DuplicateWorkId(WorkId),
     #[error("'{0}' is not a valid work id")]
     InvalidWorkId(String),
     #[error("'{0}' is not a valid done id")]

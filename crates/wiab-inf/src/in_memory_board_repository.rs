@@ -4,10 +4,11 @@ use std::{
 };
 
 use wiab_core::board::{Board, BoardId, BoardRepository};
+use wiab_core::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryBoardRepository {
-    boards: Arc<RwLock<HashMap<BoardId, Board>>>,
+    boards: Arc<RwLock<HashMap<BoardId, (Board, u64)>>>,
 }
 
 impl InMemoryBoardRepository {
@@ -17,27 +18,39 @@ impl InMemoryBoardRepository {
 }
 
 impl BoardRepository for InMemoryBoardRepository {
-    fn save(&self, board: Board) {
-        self.boards
+    async fn save(&self, board: Board, expected: Version) -> Result<Version, SaveError> {
+        let mut boards = self
+            .boards
             .write()
-            .expect("board repository write lock poisoned")
-            .insert(board.id(), board);
+            .expect("board repository write lock poisoned");
+        let current = boards
+            .get(&board.id())
+            .map(|(_, version)| *version)
+            .unwrap_or(0);
+        if current != expected.value() {
+            return Err(SaveError::Conflict);
+        }
+        let next = expected.next();
+        boards.insert(board.id(), (board, next.value()));
+        Ok(next)
     }
 
-    fn get(&self, id: &BoardId) -> Option<Board> {
-        self.boards
+    async fn get(&self, id: &BoardId) -> Result<Option<(Board, Version)>, RepoError> {
+        Ok(self
+            .boards
             .read()
             .expect("board repository read lock poisoned")
             .get(id)
-            .cloned()
+            .map(|(board, version)| (board.clone(), Version::from_value(*version))))
     }
 
-    fn list(&self) -> Vec<Board> {
-        self.boards
+    async fn list(&self) -> Result<Vec<Board>, RepoError> {
+        Ok(self
+            .boards
             .read()
             .expect("board repository read lock poisoned")
             .values()
-            .cloned()
-            .collect()
+            .map(|(board, _)| board.clone())
+            .collect())
     }
 }

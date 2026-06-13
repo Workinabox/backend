@@ -8,6 +8,7 @@ pub mod organization;
 pub mod pipeline;
 pub mod project;
 pub mod repo;
+pub mod repository;
 pub mod transcript;
 pub mod user;
 pub mod work;

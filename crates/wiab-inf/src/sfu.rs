@@ -1024,6 +1024,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                         let meeting = match sfu
                             .meeting_service
                             .validate_join(&meeting_id, &participant_id)
+                            .await
                         {
                             Ok(meeting) => meeting,
                             Err(err) => {
