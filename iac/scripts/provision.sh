@@ -19,7 +19,8 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl jq tar coreutils ufw \
   nginx certbot python3-certbot-nginx \
   qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils cpu-checker \
-  libssl3 libopus0
+  libssl3 libopus0 \
+  postgresql
 update-ca-certificates || true
 
 # ---------------------------------------------------------------------------
@@ -82,12 +83,26 @@ fi
 id wiab >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin wiab
 
 # ---------------------------------------------------------------------------
-# 4. Backend env + systemd service (binary installed by wiab-deploy below)
+# 4. Local PostgreSQL (persistence backend)
+# ---------------------------------------------------------------------------
+log "configuring local postgresql"
+systemctl enable --now postgresql
+# Role + database (idempotent); always (re)set the password so it matches config.
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='wiab'" | grep -q 1 \
+  || sudo -u postgres psql -c "CREATE ROLE wiab LOGIN"
+sudo -u postgres psql -c "ALTER ROLE wiab LOGIN PASSWORD '${WIAB_DB_PASSWORD}'"
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='wiab'" | grep -q 1 \
+  || sudo -u postgres createdb -O wiab wiab
+
+# ---------------------------------------------------------------------------
+# 5. Backend env + systemd service (binary installed by wiab-deploy below)
 # ---------------------------------------------------------------------------
 mkdir -p /etc/wiab
 cat > /etc/wiab/wiab.env <<EOF
 WIAB_MEDIASOUP_LISTEN_IP=0.0.0.0
 WIAB_MEDIASOUP_ANNOUNCED_ADDRESS=${WIAB_ANNOUNCED_ADDRESS}
+WIAB_PERSISTENCE=postgres
+DATABASE_URL=postgres://wiab:${WIAB_DB_PASSWORD}@localhost:5432/wiab
 EOF
 
 cat > /etc/systemd/system/wiab.service <<'EOF'

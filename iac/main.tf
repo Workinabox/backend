@@ -31,6 +31,7 @@ locals {
     frontend_version   = var.frontend_version
     fc_kernel_url      = var.fc_test_kernel_url
     fc_rootfs_url      = var.fc_test_rootfs_url
+    db_password        = var.db_password
   })
 
   network_config = templatefile("${path.module}/templates/network-config.yaml.tftpl", {
@@ -74,7 +75,11 @@ resource "xenorchestra_vm" "host" {
   }
 
   lifecycle {
-    ignore_changes = [power_state]
+    # power_state: the VM is started out-of-band by enable_nested_virt.
+    # cloud_config/cloud_network_config: cloud-init only runs at first boot, so editing
+    # provision.sh / the templates must not force-replace the live VM. Existing VMs are
+    # updated over SSH (provision_db, deploy_app); fresh VMs get the new cloud-init.
+    ignore_changes = [power_state, cloud_config, cloud_network_config]
   }
 }
 
@@ -92,12 +97,51 @@ resource "null_resource" "enable_nested_virt" {
   }
 }
 
+# Installs and configures a local PostgreSQL on the existing VM over SSH, and points the
+# backend at it (WIAB_PERSISTENCE=postgres + DATABASE_URL in /etc/wiab/wiab.env). Idempotent
+# and re-runnable without recreating the VM: bump db_provision_version to re-run. Runs
+# before deploy_app so a newly deployed binary boots with the database already present.
+resource "null_resource" "provision_db" {
+  depends_on = [null_resource.enable_nested_virt]
+
+  triggers = {
+    db_provision_version = var.db_provision_version
+    db_password          = var.db_password
+  }
+
+  connection {
+    host        = var.host_ip
+    user        = "ubuntu"
+    private_key = file(pathexpand(var.ssh_private_key_path))
+    timeout     = "10m"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "set -euo pipefail",
+      "cloud-init status --wait || true",
+      "sudo apt-get update -y",
+      "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql",
+      "sudo systemctl enable --now postgresql",
+      # Role + database (idempotent); always (re)set the password so it matches config.
+      "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='wiab'\" | grep -q 1 || sudo -u postgres psql -c \"CREATE ROLE wiab LOGIN\"",
+      "sudo -u postgres psql -c \"ALTER ROLE wiab LOGIN PASSWORD '${var.db_password}'\"",
+      "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_database WHERE datname='wiab'\" | grep -q 1 || sudo -u postgres createdb -O wiab wiab",
+      # Point the backend at Postgres (merge into wiab.env without clobbering other vars).
+      "sudo sed -i '/^WIAB_PERSISTENCE=/d;/^DATABASE_URL=/d' /etc/wiab/wiab.env",
+      "echo 'WIAB_PERSISTENCE=postgres' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'DATABASE_URL=postgres://wiab:${var.db_password}@localhost:5432/wiab' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "sudo systemctl restart wiab || true",
+    ]
+  }
+}
+
 # Deploys the pinned backend/frontend versions over SSH. Re-runs whenever a
 # version variable changes (bump backend_version / frontend_version and apply)
 # WITHOUT recreating the VM. On first apply it waits for cloud-init to finish,
 # then no-ops because wiab-deploy is idempotent (the version is already deployed).
 resource "null_resource" "deploy_app" {
-  depends_on = [null_resource.enable_nested_virt]
+  depends_on = [null_resource.enable_nested_virt, null_resource.provision_db]
 
   triggers = {
     backend_version  = var.backend_version

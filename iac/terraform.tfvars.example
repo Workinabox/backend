@@ -39,3 +39,9 @@ frontend_version = "latest"
 
 # Private key matching ssh_authorized_key, used for the in-place deploy over SSH.
 ssh_private_key_path = "~/.ssh/id_rsa"
+
+# --- Persistence (local PostgreSQL on the VM) ---
+# Postgres is installed/configured over SSH (no VM rebuild). Bump db_provision_version
+# to re-run the provisioning. db_password is the local 'wiab' role password (localhost-only).
+db_provision_version = "v1"
+db_password          = "wiab"

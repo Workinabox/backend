@@ -25,6 +25,7 @@ write_files:
       WIAB_FRONTEND_VERSION=${frontend_version}
       WIAB_FC_KERNEL_URL=${fc_kernel_url}
       WIAB_FC_ROOTFS_URL=${fc_rootfs_url}
+      WIAB_DB_PASSWORD=${db_password}
   - path: /opt/wiab/provision.sh
     permissions: '0755'
     encoding: b64

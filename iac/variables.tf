@@ -145,6 +145,22 @@ variable "ssh_private_key_path" {
 }
 
 # ---------------------------------------------------------------------------
+# Persistence (local PostgreSQL on the VM)
+# ---------------------------------------------------------------------------
+variable "db_provision_version" {
+  type        = string
+  description = "Bump this to re-run the PostgreSQL provisioning over SSH (install/config) without recreating the VM."
+  default     = "v1"
+}
+
+variable "db_password" {
+  type        = string
+  description = "Password for the local 'wiab' Postgres role (localhost-only; not network-exposed)."
+  default     = "wiab"
+  sensitive   = true
+}
+
+# ---------------------------------------------------------------------------
 # Firecracker smoke-test artifacts (bump as upstream rotates them)
 # ---------------------------------------------------------------------------
 variable "fc_test_kernel_url" {
