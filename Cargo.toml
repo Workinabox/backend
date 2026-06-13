@@ -14,14 +14,24 @@ wiab-inf = { path = "crates/wiab-inf" }
 wiab-app = { path = "crates/wiab-app" }
 anyhow = "1.0.100"
 axum = { version = "0.8", features = ["macros", "ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
+crc32fast = "1"
+flate2 = "1.0"
 futures-util = "0.3"
+git2 = "0.20"
 llama-cpp-2 = { version = "0.1.138", default-features = false }
 mediasoup = "0.20"
 opus = "0.3"
+rand = "0.10"
+rcgen = "0.13"
 rstest = "0.26.1"
+russh = "0.61"
+rustls = { version = "0.23", features = ["ring"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.138"
+sha2 = "0.10"
+tempfile = "3"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -35,6 +45,9 @@ wiab-core = { workspace = true }
 wiab-inf = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+axum-server = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

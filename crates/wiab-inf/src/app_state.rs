@@ -1,15 +1,18 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use wiab_app::{
-    AgentApplicationService, BoardApplicationService, MeetingApplicationService,
-    OrganizationApplicationService, PipelineApplicationService, ProjectApplicationService,
-    RepoApplicationService, WorkApplicationService,
+    AccessApplicationService, AgentApplicationService, AuthorizationService,
+    BoardApplicationService, MeetingApplicationService, OrganizationApplicationService,
+    PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
+    UserApplicationService, WorkApplicationService,
 };
 
 use crate::{
     InMemoryAgentRepository, InMemoryBoardRepository, InMemoryMeetingRepository,
     InMemoryOrganizationRepository, InMemoryPipelineRepository, InMemoryProjectRepository,
-    InMemoryRepoRepository, InMemoryWorkRepository, Sfu,
+    InMemoryRepoRepository, InMemoryRoleAssignmentRepository, InMemoryUserRepository,
+    InMemoryWorkRepository, Sfu,
 };
 
 #[derive(Clone)]
@@ -24,11 +27,24 @@ pub struct AppState {
         Arc<BoardApplicationService<InMemoryBoardRepository, InMemoryProjectRepository>>,
     pub repo_service:
         Arc<RepoApplicationService<InMemoryRepoRepository, InMemoryProjectRepository>>,
+    pub user_service: Arc<UserApplicationService<InMemoryUserRepository>>,
+    pub access_service:
+        Arc<AccessApplicationService<InMemoryRoleAssignmentRepository, InMemoryUserRepository>>,
+    pub authorization_service: Arc<
+        AuthorizationService<
+            InMemoryRoleAssignmentRepository,
+            InMemoryRepoRepository,
+            InMemoryProjectRepository,
+        >,
+    >,
     pub pipeline_service:
         Arc<PipelineApplicationService<InMemoryPipelineRepository, InMemoryProjectRepository>>,
     pub work_service:
         Arc<WorkApplicationService<InMemoryWorkRepository, InMemoryProjectRepository>>,
     pub sfu: Arc<Sfu>,
+    /// Filesystem root under which hosted bare git repos live (`<root>/R-<n>.git`).
+    /// Used by the Smart-HTTP handlers to locate the repo to serve.
+    pub git_root: PathBuf,
     /// Version of the running backend, reported by `/health`.
     pub version: &'static str,
 }

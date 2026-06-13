@@ -1,23 +1,30 @@
 use axum::{
     Json, Router,
-    extract::{Path, State, ws::WebSocketUpgrade},
-    http::StatusCode,
+    body::Bytes,
+    extract::{Path, Query, State, ws::WebSocketUpgrade},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
+use base64::Engine;
 use wiab_app::{
-    AddDoneRequest, CreateAgentRequest, CreateBoardRequest, CreateMeetingRequest,
-    CreateOrganizationRequest, CreatePipelineRequest, CreateProjectRequest, CreateRepoRequest,
-    CreateWorkRequest, UpdateAgentRequest, UpdateBoardRequest, UpdateOrganizationRequest,
-    UpdatePipelineRequest, UpdateProjectRequest, UpdateRepoRequest, UpdateWorkRequest,
+    AddDoneRequest, AddSshKeyRequest, CommitChangesRequest, CreateAgentRequest, CreateBoardRequest,
+    CreateMeetingRequest, CreateOrganizationRequest, CreatePipelineRequest, CreateProjectRequest,
+    CreateRepoRequest, CreateUserRequest, CreateWorkRequest, GrantRoleRequest, IssueTokenRequest,
+    IssuedTokenSnapshot, SetVisibilityRequest, UpdateAgentRequest, UpdateBoardRequest,
+    UpdateOrganizationRequest, UpdatePipelineRequest, UpdateProjectRequest, UpdateRepoRequest,
+    UpdateWorkRequest,
 };
-use wiab_core::agent::AgentSnapshot;
+use wiab_core::access::{Operation, Role, RoleAssignmentSnapshot, Scope};
+use wiab_core::agent::{AgentId, AgentSnapshot};
 use wiab_core::board::BoardSnapshot;
 use wiab_core::meeting::MeetingSnapshot;
+use wiab_core::organization::OrganizationId;
 use wiab_core::organization::OrganizationSnapshot;
 use wiab_core::pipeline::PipelineSnapshot;
 use wiab_core::project::ProjectSnapshot;
-use wiab_core::repo::RepoSnapshot;
+use wiab_core::repo::{BranchSnapshot, CommitSnapshot, FileEntrySnapshot, RepoId, RepoSnapshot};
+use wiab_core::user::{TokenScope, UserId, UserSnapshot};
 use wiab_core::work::WorkSnapshot;
 
 use crate::{AppState, handle_signal_socket};
@@ -65,6 +72,47 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{agent_id}", put(update_agent).get(get_agent))
         .route("/boards/{board_id}", put(update_board).get(get_board))
         .route("/repos/{repo_id}", put(update_repo).get(get_repo))
+        .route("/repos/{repo_id}/branches", get(list_branches))
+        .route(
+            "/repos/{repo_id}/branches/{branch}/files",
+            get(list_repo_files),
+        )
+        .route(
+            "/repos/{repo_id}/branches/{branch}/files/raw",
+            get(read_repo_file),
+        )
+        .route(
+            "/repos/{repo_id}/branches/{branch}/commits",
+            get(list_repo_commits),
+        )
+        .route("/repos/{repo_id}/commits", post(create_commit))
+        .route("/repos/{repo_id}/visibility", put(set_repo_visibility))
+        // Identity & access management.
+        .route("/users", get(list_users).post(create_user))
+        .route("/users/{user_id}", get(get_user))
+        .route("/users/{user_id}/ssh-keys", post(add_ssh_key))
+        .route("/users/{user_id}/ssh-keys/{key_id}", delete(remove_ssh_key))
+        .route("/users/{user_id}/tokens", post(issue_token))
+        .route("/users/{user_id}/tokens/{token_id}", delete(revoke_token))
+        .route(
+            "/role-assignments",
+            get(list_role_assignments).post(grant_role),
+        )
+        .route("/role-assignments/{assignment_id}", delete(revoke_role))
+        // Git Smart-HTTP transport (real `git clone`/`fetch`/`push`). The `{repo_id}`
+        // segment arrives as `R-<n>.git`; the handlers strip the `.git` suffix.
+        .route(
+            "/repos/{repo_id}/info/refs",
+            get(crate::git_http::info_refs),
+        )
+        .route(
+            "/repos/{repo_id}/git-upload-pack",
+            post(crate::git_http::upload_pack),
+        )
+        .route(
+            "/repos/{repo_id}/git-receive-pack",
+            post(crate::git_http::receive_pack),
+        )
         .route(
             "/pipelines/{pipeline_id}",
             put(update_pipeline).get(get_pipeline),
@@ -234,14 +282,29 @@ async fn create_agent(
     Path(organization_id): Path<String>,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
-    match state
+    let snapshot = match state
         .agent_service
         .create_agent(&organization_id, request)
         .map_err(bad_request)?
     {
-        Some(snapshot) => Ok(Json(snapshot)),
-        None => Err(not_found("organization", &organization_id)),
-    }
+        Some(snapshot) => snapshot,
+        None => return Err(not_found("organization", &organization_id)),
+    };
+
+    // Provision the agent's own user identity, granted Write on its org so it can push to
+    // the org's repos once it has a key/token.
+    let agent_id: AgentId = snapshot.id.parse().map_err(internal)?;
+    let user = state
+        .user_service
+        .provision_agent_user(snapshot.name.clone(), agent_id)
+        .map_err(bad_request)?;
+    let user_id: UserId = user.id.parse().map_err(internal)?;
+    let org: OrganizationId = snapshot.organization_id.parse().map_err(internal)?;
+    state
+        .access_service
+        .grant_direct(user_id, Scope::Org(org), Role::Write);
+
+    Ok(Json(snapshot))
 }
 
 async fn get_agent(
@@ -348,8 +411,17 @@ async fn list_repos(
 async fn create_repo(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateRepoRequest>,
 ) -> Result<Json<RepoSnapshot>, (StatusCode, String)> {
+    let Some(project) = state
+        .project_service
+        .project_snapshot(&project_id)
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("project", &project_id));
+    };
+    require_org_role(&state, &project.organization_id, Operation::Write, &headers).await?;
     match state
         .repo_service
         .create_repo(&project_id, request)
@@ -386,6 +458,388 @@ async fn update_repo(
     {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FilesQuery {
+    path: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawFileQuery {
+    path: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CommitsQuery {
+    limit: Option<usize>,
+}
+
+/// Runs a blocking repo-service call (libgit2 touches disk) off the async runtime,
+/// mapping a join failure to 500 and a domain error to 400.
+async fn run_blocking<T, F>(f: F) -> Result<Option<T>, (StatusCode, String)>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<Option<T>> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(internal)?
+        .map_err(bad_request)
+}
+
+async fn list_branches(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+) -> Result<Json<Vec<BranchSnapshot>>, (StatusCode, String)> {
+    let service = state.repo_service.clone();
+    let id = repo_id.clone();
+    match run_blocking(move || service.list_branches(&id)).await? {
+        Some(branches) => Ok(Json(branches)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn list_repo_files(
+    State(state): State<AppState>,
+    Path((repo_id, branch)): Path<(String, String)>,
+    Query(query): Query<FilesQuery>,
+) -> Result<Json<Vec<FileEntrySnapshot>>, (StatusCode, String)> {
+    let service = state.repo_service.clone();
+    let dir = query.path.unwrap_or_default();
+    let (id, branch_param) = (repo_id.clone(), branch);
+    match run_blocking(move || service.list_files(&id, &branch_param, &dir)).await? {
+        Some(entries) => Ok(Json(entries)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn read_repo_file(
+    State(state): State<AppState>,
+    Path((repo_id, branch)): Path<(String, String)>,
+    Query(query): Query<RawFileQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let service = state.repo_service.clone();
+    let (id, branch_param, path) = (repo_id.clone(), branch, query.path);
+    match run_blocking(move || service.read_file(&id, &branch_param, &path)).await? {
+        Some(bytes) => Ok((
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            Bytes::from(bytes),
+        )),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn list_repo_commits(
+    State(state): State<AppState>,
+    Path((repo_id, branch)): Path<(String, String)>,
+    Query(query): Query<CommitsQuery>,
+) -> Result<Json<Vec<CommitSnapshot>>, (StatusCode, String)> {
+    let service = state.repo_service.clone();
+    let limit = query.limit.unwrap_or(20).clamp(1, 1000);
+    let (id, branch_param) = (repo_id.clone(), branch);
+    match run_blocking(move || service.recent_commits(&id, &branch_param, limit)).await? {
+        Some(commits) => Ok(Json(commits)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn create_commit(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CommitChangesRequest>,
+) -> Result<Json<CommitSnapshot>, (StatusCode, String)> {
+    require_repo_role(&state, &repo_id, Operation::Write, &headers).await?;
+    let service = state.repo_service.clone();
+    let id = repo_id.clone();
+    match run_blocking(move || service.commit_changes(&id, request)).await? {
+        Some(commit) => Ok(Json(commit)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+/// Extracts the password field of an `Authorization: Basic` header — git sends the
+/// access token there.
+pub(crate) fn basic_auth_password(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = value.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    decoded.split_once(':').map(|(_, pass)| pass.to_owned())
+}
+
+/// The request's access token, from `Authorization: Bearer <token>` (console) or the
+/// password field of HTTP Basic (git).
+fn request_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        && let Some(token) = value.strip_prefix("Bearer ")
+    {
+        return Some(token.to_owned());
+    }
+    basic_auth_password(headers)
+}
+
+/// Resolves the request's token to a user and its scope, or 401.
+async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(UserId, TokenScope), (StatusCode, String)> {
+    let Some(token) = request_token(headers) else {
+        return Err(unauthorized());
+    };
+    let user_service = state.user_service.clone();
+    match tokio::task::spawn_blocking(move || user_service.resolve_token(&token))
+        .await
+        .map_err(internal)?
+    {
+        Some(resolved) => Ok(resolved),
+        None => Err(unauthorized()),
+    }
+}
+
+/// Requires the caller be an Owner — the bar for managing users and grants.
+async fn require_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<UserId, (StatusCode, String)> {
+    let (user, _scope) = authenticate(state, headers).await?;
+    let access = state.access_service.clone();
+    let is_owner = tokio::task::spawn_blocking(move || access.is_owner(user))
+        .await
+        .map_err(internal)?;
+    if is_owner { Ok(user) } else { Err(forbidden()) }
+}
+
+/// Requires the caller hold a sufficient org-level role for the operation (e.g. creating
+/// a repo).
+async fn require_org_role(
+    state: &AppState,
+    org_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let (user, _scope) = authenticate(state, headers).await?;
+    let org: OrganizationId = org_id
+        .parse()
+        .map_err(|_| not_found("organization", org_id))?;
+    let authz = state.authorization_service.clone();
+    let allowed = tokio::task::spawn_blocking(move || authz.authorize_org(user, org, operation))
+        .await
+        .map_err(internal)?;
+    if allowed { Ok(()) } else { Err(forbidden()) }
+}
+
+/// Requires the caller hold a sufficient role on the repo for the operation (token scope
+/// applied).
+async fn require_repo_role(
+    state: &AppState,
+    repo_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let (user, scope) = authenticate(state, headers).await?;
+    let repo: RepoId = repo_id.parse().map_err(|_| not_found("repo", repo_id))?;
+    let authz = state.authorization_service.clone();
+    let allowed =
+        tokio::task::spawn_blocking(move || authz.authorize(user, repo, operation, Some(&scope)))
+            .await
+            .map_err(internal)?;
+    if allowed { Ok(()) } else { Err(forbidden()) }
+}
+
+fn unauthorized() -> (StatusCode, String) {
+    (
+        StatusCode::UNAUTHORIZED,
+        "authentication required".to_owned(),
+    )
+}
+
+fn forbidden() -> (StatusCode, String) {
+    (StatusCode::FORBIDDEN, "insufficient permissions".to_owned())
+}
+
+fn internal(err: impl std::fmt::Display) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+}
+
+/// Allows the caller if they are the target user or an Owner — for managing a user's own
+/// keys and tokens.
+async fn require_self_or_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    target_user: &str,
+) -> Result<(), (StatusCode, String)> {
+    let (user, _scope) = authenticate(state, headers).await?;
+    if user.to_string() == target_user {
+        return Ok(());
+    }
+    let access = state.access_service.clone();
+    let is_owner = tokio::task::spawn_blocking(move || access.is_owner(user))
+        .await
+        .map_err(internal)?;
+    if is_owner { Ok(()) } else { Err(forbidden()) }
+}
+
+async fn set_repo_visibility(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SetVisibilityRequest>,
+) -> Result<Json<RepoSnapshot>, (StatusCode, String)> {
+    require_repo_role(&state, &repo_id, Operation::Administer, &headers).await?;
+    let service = state.repo_service.clone();
+    let id = repo_id.clone();
+    match run_blocking(move || service.set_visibility(&id, request)).await? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn list_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<UserSnapshot>>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let service = state.user_service.clone();
+    let users = tokio::task::spawn_blocking(move || service.list_users())
+        .await
+        .map_err(internal)?;
+    Ok(Json(users))
+}
+
+async fn create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateUserRequest>,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let service = state.user_service.clone();
+    let snapshot = tokio::task::spawn_blocking(move || service.create_user(request))
+        .await
+        .map_err(internal)?
+        .map_err(bad_request)?;
+    Ok(Json(snapshot))
+}
+
+async fn get_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_self_or_owner(&state, &headers, &user_id).await?;
+    let service = state.user_service.clone();
+    let id = user_id.clone();
+    match run_blocking(move || service.user_snapshot(&id)).await? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("user", &user_id)),
+    }
+}
+
+async fn add_ssh_key(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<AddSshKeyRequest>,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_self_or_owner(&state, &headers, &user_id).await?;
+    let service = state.user_service.clone();
+    let id = user_id.clone();
+    match run_blocking(move || service.add_ssh_key(&id, request)).await? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("user", &user_id)),
+    }
+}
+
+async fn remove_ssh_key(
+    State(state): State<AppState>,
+    Path((user_id, key_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_self_or_owner(&state, &headers, &user_id).await?;
+    let service = state.user_service.clone();
+    let id = user_id.clone();
+    match run_blocking(move || service.remove_ssh_key(&id, &key_id)).await? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("user", &user_id)),
+    }
+}
+
+async fn issue_token(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<IssueTokenRequest>,
+) -> Result<Json<IssuedTokenSnapshot>, (StatusCode, String)> {
+    require_self_or_owner(&state, &headers, &user_id).await?;
+    let service = state.user_service.clone();
+    let id = user_id.clone();
+    match run_blocking(move || service.issue_token(&id, request)).await? {
+        Some(issued) => Ok(Json(issued)),
+        None => Err(not_found("user", &user_id)),
+    }
+}
+
+async fn revoke_token(
+    State(state): State<AppState>,
+    Path((user_id, token_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_self_or_owner(&state, &headers, &user_id).await?;
+    let service = state.user_service.clone();
+    let id = user_id.clone();
+    match run_blocking(move || service.revoke_token(&id, &token_id)).await? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("user", &user_id)),
+    }
+}
+
+async fn list_role_assignments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RoleAssignmentSnapshot>>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let service = state.access_service.clone();
+    let assignments = tokio::task::spawn_blocking(move || service.list_assignments())
+        .await
+        .map_err(internal)?;
+    Ok(Json(assignments))
+}
+
+async fn grant_role(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GrantRoleRequest>,
+) -> Result<Json<RoleAssignmentSnapshot>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let service = state.access_service.clone();
+    match run_blocking(move || service.grant(request)).await? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("user", "grantee")),
+    }
+}
+
+async fn revoke_role(
+    State(state): State<AppState>,
+    Path(assignment_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let service = state.access_service.clone();
+    let id = assignment_id.clone();
+    let removed = tokio::task::spawn_blocking(move || service.revoke(&id))
+        .await
+        .map_err(internal)?
+        .map_err(bad_request)?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(not_found("role assignment", &assignment_id))
     }
 }
 

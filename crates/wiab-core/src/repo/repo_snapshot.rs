@@ -8,4 +8,5 @@ pub struct RepoSnapshot {
     pub project_id: String,
     pub name: String,
     pub description: String,
+    pub visibility: String,
 }
