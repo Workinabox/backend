@@ -14,8 +14,9 @@ log() { echo "[wiab-provision] $*"; }
 # 1. Packages
 # ---------------------------------------------------------------------------
 log "installing packages"
-apt-get update -y
-apt-get install -y --no-install-recommends \
+# Wait for the apt/dpkg lock rather than aborting (unattended-upgrades runs at boot).
+apt-get -o DPkg::Lock::Timeout=300 update -y
+apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
   ca-certificates curl jq tar coreutils ufw \
   nginx certbot python3-certbot-nginx \
   qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils cpu-checker \
