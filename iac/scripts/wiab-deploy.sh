@@ -60,7 +60,7 @@ release_json() { # $1 = repo, $2 = spec (latest|vX.Y.Z)
 backend_healthy() {
   local i
   for i in $(seq 1 15); do
-    curl -fsS -o /dev/null http://127.0.0.1:8080/health 2>/dev/null && return 0
+    curl -fsSk -o /dev/null https://127.0.0.1:8080/health 2>/dev/null && return 0
     sleep 1
   done
   return 1
