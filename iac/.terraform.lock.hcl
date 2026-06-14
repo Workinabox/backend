@@ -4,6 +4,7 @@
 provider "registry.terraform.io/hashicorp/null" {
   version = "3.3.0"
   hashes = [
+    "h1:a14TKo7Xvg4W8+H1VA6p+oLZTLxVQnYUD8LOaOs14A8=",
     "h1:l+dm3lhmu4ys7GbvIldfn544olSPH0DOiYruuFSfQkY=",
     "zh:021748b5ea3b5f6956f2e75c42c5cdc113b391fb98ac71364a4965d23b37000f",
     "zh:3b27956f8541d46704fda234e0d535c2ae2a4b33411848b1ee262a1ec03568b0",
@@ -26,6 +27,7 @@ provider "registry.terraform.io/vatesfr/xenorchestra" {
   constraints = "~> 0.37"
   hashes = [
     "h1:L6M23jkp87bJZErWvkWmHmOQ1UM+XGXbDVI3YWRyNO0=",
+    "h1:aqWkUNifIHIg7LtHYZqyE70kTsot8EO0Xuh1MsPdaLg=",
     "zh:116a14ba9a31d1d70c05629ed88d7041bcc5888e71de244f26f8202e892a3308",
     "zh:38233e2e7e2e93b48a4e618b5a5e91f562dad15b0059872f6ab3f15c59a84afa",
     "zh:4c9c516152af41668bce1bc0601290f7848a0d7edd4fa8cf00a1c9d5336f3cbd",
