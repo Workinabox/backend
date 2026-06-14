@@ -118,15 +118,21 @@ resource "null_resource" "provision_db" {
 
   provisioner "remote-exec" {
     inline = [
-      "set -euo pipefail",
+      # terraform remote-exec runs this under /bin/sh (dash), which has no `pipefail`
+      # (`set -o pipefail` aborts dash with exit 2). `set -eu` is enough and portable.
+      "set -eu",
       "cloud-init status --wait || true",
-      "sudo apt-get update -y",
-      "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql",
+      # Wait up to 5 min for the apt/dpkg lock (unattended-upgrades runs at boot and
+      # periodically; without this, apt aborts with exit 2 when the lock is held).
+      "sudo apt-get -o DPkg::Lock::Timeout=300 update -y",
+      "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y postgresql",
       "sudo systemctl enable --now postgresql",
-      # Role + database (idempotent); always (re)set the password so it matches config.
-      "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='wiab'\" | grep -q 1 || sudo -u postgres psql -c \"CREATE ROLE wiab LOGIN\"",
+      # Role + database (idempotent). `|| true` swallows the harmless 'already exists'
+      # error on re-runs; avoiding a pipe sidesteps the set -o pipefail / SIGPIPE trap.
+      # ALTER ROLE always (re)sets the password so it matches config (errors surface).
+      "sudo -u postgres psql -c \"CREATE ROLE wiab LOGIN\" || true",
       "sudo -u postgres psql -c \"ALTER ROLE wiab LOGIN PASSWORD '${var.db_password}'\"",
-      "sudo -u postgres psql -tAc \"SELECT 1 FROM pg_database WHERE datname='wiab'\" | grep -q 1 || sudo -u postgres createdb -O wiab wiab",
+      "sudo -u postgres createdb -O wiab wiab || true",
       # Point the backend at Postgres (merge into wiab.env without clobbering other vars).
       "sudo sed -i '/^WIAB_PERSISTENCE=/d;/^DATABASE_URL=/d' /etc/wiab/wiab.env",
       "echo 'WIAB_PERSISTENCE=postgres' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
