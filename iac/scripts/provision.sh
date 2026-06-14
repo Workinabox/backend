@@ -156,10 +156,12 @@ server {
     }
 
     # Trailing slash on proxy_pass strips the /api prefix:
-    #   /api/works  -> http://127.0.0.1:8080/works
-    #   /api/signal -> http://127.0.0.1:8080/signal  (WebSocket)
+    #   /api/works  -> https://127.0.0.1:8080/works
+    #   /api/signal -> https://127.0.0.1:8080/signal  (WebSocket)
+    # The backend serves HTTPS (self-signed); skip upstream verification on the localhost hop.
     location /api/ {
-        proxy_pass http://127.0.0.1:8080/;
+        proxy_pass https://127.0.0.1:8080/;
+        proxy_ssl_verify off;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;

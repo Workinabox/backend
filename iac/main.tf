@@ -142,12 +142,55 @@ resource "null_resource" "provision_db" {
   }
 }
 
+# Pushes the latest wiab-deploy script and points the nginx /api proxy at the HTTPS
+# backend on the EXISTING VM (cloud-init only writes these at first boot). Idempotent;
+# re-runs when wiab-deploy.sh changes. Runs before deploy_app so the new health check
+# (https) and proxy are in place before the binary is (re)deployed.
+resource "null_resource" "reconfigure_proxy" {
+  depends_on = [null_resource.enable_nested_virt]
+
+  triggers = {
+    wiab_deploy_sha = filesha256("${path.module}/scripts/wiab-deploy.sh")
+    proxy_scheme    = "https"
+  }
+
+  connection {
+    host        = var.host_ip
+    user        = "ubuntu"
+    private_key = file(pathexpand(var.ssh_private_key_path))
+    timeout     = "10m"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/scripts/wiab-deploy.sh"
+    destination = "/tmp/wiab-deploy"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "set -eu",
+      "cloud-init status --wait || true",
+      "sudo install -m 0755 /tmp/wiab-deploy /usr/local/bin/wiab-deploy",
+      # Point the nginx /api proxy at the HTTPS backend, with verification off for the
+      # self-signed localhost hop. Both seds are idempotent (no-op once already https).
+      "sudo sed -i 's#proxy_pass http://127.0.0.1:8080/;#proxy_pass https://127.0.0.1:8080/;#g' /etc/nginx/sites-available/wiab",
+      "grep -q 'proxy_ssl_verify off' /etc/nginx/sites-available/wiab || sudo sed -i 's#proxy_pass https://127.0.0.1:8080/;#proxy_pass https://127.0.0.1:8080/;\\n        proxy_ssl_verify off;#g' /etc/nginx/sites-available/wiab",
+      "sudo nginx -t",
+      "sudo systemctl reload nginx",
+    ]
+  }
+}
+
 # Deploys the pinned backend/frontend versions over SSH. Re-runs whenever a
 # version variable changes (bump backend_version / frontend_version and apply)
 # WITHOUT recreating the VM. On first apply it waits for cloud-init to finish,
 # then no-ops because wiab-deploy is idempotent (the version is already deployed).
 resource "null_resource" "deploy_app" {
-  depends_on = [null_resource.enable_nested_virt, null_resource.provision_db]
+  depends_on = [
+    null_resource.enable_nested_virt,
+    null_resource.provision_db,
+    null_resource.reconfigure_proxy,
+  ]
 
   triggers = {
     backend_version  = var.backend_version

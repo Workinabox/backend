@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
-use tracing::info;
+use tracing::{info, warn};
 use wiab_inf::{http_router, spawn_git_ssh_server};
 
 /// Backend configuration. Each value defaults to a baked-in dev value, can be overridden by
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = bootstrap::build_app_state(&cli.persistence, &cli.database_url).await?;
 
-    // Git SSH transport runs on its own port alongside the main HTTP server.
+    // Git SSH transport runs on its own port alongside the HTTPS server.
     let ssh_addr = std::env::var("WIAB_GIT_SSH_ADDR").unwrap_or_else(|_| "0.0.0.0:2222".to_owned());
     let ssh_host_key = std::env::var("WIAB_GIT_SSH_HOST_KEY").ok();
     {
@@ -92,42 +92,45 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = "0.0.0.0:8080"
         .parse()
         .context("invalid backend bind address")?;
+    let tls = load_tls_config().await?;
+    info!("wiab backend listening on https://{addr}");
 
-    // Serve HTTPS only when a cert/key is explicitly configured. Otherwise serve plain
-    // HTTP: in production TLS is terminated upstream by nginx (which proxies to
-    // http://127.0.0.1:8080), and locally http://localhost:8080 is convenient.
-    let result = match load_tls_config().await? {
-        Some(tls) => {
-            info!("wiab backend listening on https://{addr}");
-            axum_server::bind_rustls(addr, tls)
-                .serve(app.into_make_service())
-                .await
-        }
-        None => {
-            info!(
-                "wiab backend listening on http://{addr} (TLS terminated upstream; \
-                 set WIAB_TLS_CERT/WIAB_TLS_KEY to serve HTTPS directly)"
-            );
-            axum_server::bind(addr).serve(app.into_make_service()).await
-        }
-    };
-    result.context("backend server terminated unexpectedly")?;
+    axum_server::bind_rustls(addr, tls)
+        .serve(app.into_make_service())
+        .await
+        .context("backend server terminated unexpectedly")?;
 
     Ok(())
 }
 
-/// Loads the TLS cert/key from `WIAB_TLS_CERT`/`WIAB_TLS_KEY` (PEM) when both are set, else
-/// `None` — serve plain HTTP and let a reverse proxy terminate TLS.
-async fn load_tls_config() -> anyhow::Result<Option<RustlsConfig>> {
+/// Loads the TLS cert/key from `WIAB_TLS_CERT`/`WIAB_TLS_KEY` (PEM), or generates a
+/// self-signed cert. The backend always serves HTTPS; a reverse proxy connects to it over
+/// TLS (with verification disabled for the self-signed case).
+async fn load_tls_config() -> anyhow::Result<RustlsConfig> {
     match (
         std::env::var("WIAB_TLS_CERT"),
         std::env::var("WIAB_TLS_KEY"),
     ) {
         (Ok(cert), Ok(key)) => RustlsConfig::from_pem_file(cert, key)
             .await
-            .map(Some)
             .context("failed to load TLS cert/key"),
-        _ => Ok(None),
+        _ => {
+            warn!(
+                "WIAB_TLS_CERT/WIAB_TLS_KEY unset; generating a self-signed certificate \
+                 (clients/proxies must skip verification or trust it)"
+            );
+            let cert = rcgen::generate_simple_self_signed(vec![
+                "localhost".to_owned(),
+                "127.0.0.1".to_owned(),
+            ])
+            .context("failed to generate self-signed certificate")?;
+            RustlsConfig::from_pem(
+                cert.cert.pem().into_bytes(),
+                cert.key_pair.serialize_pem().into_bytes(),
+            )
+            .await
+            .context("failed to build TLS config from self-signed certificate")
+        }
     }
 }
 
