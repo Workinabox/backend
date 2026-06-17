@@ -1,0 +1,5 @@
+# Dockerfile.dev copies no source (it is bind-mounted at runtime); this just keeps the
+# build context small.
+target/
+iac/
+.git/
