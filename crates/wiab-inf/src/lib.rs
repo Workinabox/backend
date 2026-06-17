@@ -42,8 +42,12 @@ pub mod sfu;
 pub mod speech_synthesizer;
 pub mod system_clock;
 pub mod transcription;
+pub mod wiab_user_directory;
 
-pub use app_state::AppState;
+pub use app_state::{
+    AppState, AuthSettings, WiabAuthService, WiabFederationService, WiabInvitationService,
+    WiabPasswordResetService,
+};
 pub use credential_crypto::{RandomTokenFactory, Sha256KeyFingerprinter, Sha256TokenHasher};
 pub use git_ssh::spawn_git_ssh_server;
 pub use git2_backend::Git2Backend;
@@ -85,3 +89,4 @@ pub use repository_dispatch::{
 pub use sfu::{Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;
 pub use system_clock::SystemClock;
+pub use wiab_user_directory::WiabUserDirectory;

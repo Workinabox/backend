@@ -19,12 +19,19 @@ use wiab_inf::{PostgresOrganizationRepository, PostgresUserRepository, PostgresW
 async fn postgres_persistence_end_to_end() {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
-    // Migrations are idempotent: running twice is a no-op the second time.
+    // Migrations are idempotent: running twice is a no-op the second time. Both the host's
+    // series and authbox's (separate history table) must apply cleanly against a fresh DB.
     let pool = pg_pool::build_pool(&url).await.expect("pool");
     pg_pool::run_migrations(&pool).await.expect("migrate 1");
     pg_pool::run_migrations(&pool)
         .await
         .expect("migrate 2 (idempotent)");
+    authbox_inf::run_migrations(&pool)
+        .await
+        .expect("authbox migrate");
+    authbox_inf::run_migrations(&pool)
+        .await
+        .expect("authbox migrate (idempotent)");
 
     // Clean slate so the test is repeatable.
     pool.get()
@@ -111,7 +118,6 @@ async fn postgres_persistence_end_to_end() {
         UserKind::Human,
         "Alice".into(),
         Some("alice@example.com".into()),
-        None,
     )
     .unwrap();
     user.add_ssh_key(

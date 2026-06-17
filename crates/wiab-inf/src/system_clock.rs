@@ -6,20 +6,39 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_rfc3339(&self) -> String {
-        let total_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or_default();
-
-        let days_since_epoch = (total_seconds / SECONDS_PER_DAY) as i64;
-        let seconds_of_day = (total_seconds % SECONDS_PER_DAY) as u32;
-        let (year, month, day) = civil_from_days(days_since_epoch);
-        let hour = seconds_of_day / 3_600;
-        let minute = (seconds_of_day % 3_600) / 60;
-        let second = seconds_of_day % 60;
-
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+        rfc3339_from_unix(now_unix_seconds())
     }
+}
+
+/// The auth layer needs the same wall clock plus computed expiries; serve it from the same
+/// helpers so timestamps are formatted identically.
+impl authbox_core::Clock for SystemClock {
+    fn now_rfc3339(&self) -> String {
+        rfc3339_from_unix(now_unix_seconds())
+    }
+
+    fn rfc3339_in(&self, seconds: i64) -> String {
+        let base = now_unix_seconds() as i64 + seconds;
+        rfc3339_from_unix(base.max(0) as u64)
+    }
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn rfc3339_from_unix(total_seconds: u64) -> String {
+    let days_since_epoch = (total_seconds / SECONDS_PER_DAY) as i64;
+    let seconds_of_day = (total_seconds % SECONDS_PER_DAY) as u32;
+    let (year, month, day) = civil_from_days(days_since_epoch);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 const SECONDS_PER_DAY: u64 = 86_400;

@@ -1,3 +1,4 @@
+use authbox_core::auth::{AuthError, PrincipalId};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -94,11 +95,28 @@ pub fn router(state: AppState) -> Router {
         .route("/users/{user_id}/ssh-keys/{key_id}", delete(remove_ssh_key))
         .route("/users/{user_id}/tokens", post(issue_token))
         .route("/users/{user_id}/tokens/{token_id}", delete(revoke_token))
+        .route("/users/invite", post(invite_user))
+        .route("/users/{user_id}/deactivate", post(deactivate_user))
+        .route("/users/{user_id}/activate", post(activate_user))
         .route(
             "/role-assignments",
             get(list_role_assignments).post(grant_role),
         )
         .route("/role-assignments/{assignment_id}", delete(revoke_role))
+        // Interactive authentication: local password login, current-user, logout, and the
+        // login-method config the SPA reads to decide which buttons to show.
+        .route("/auth/session", post(login).get(whoami).delete(logout))
+        .route("/auth/password", put(change_password))
+        .route("/auth/password/reset/request", post(password_reset_request))
+        .route("/auth/password/reset/confirm", post(password_reset_confirm))
+        .route("/auth/config", get(auth_config))
+        // Inbound OIDC federation (Google / enterprise SSO): start redirects to the IdP, the
+        // callback validates and establishes a session. Enabled per deployment via flags.
+        .route("/auth/oidc/{connection}/start", get(oidc_start))
+        .route("/auth/oidc/{connection}/callback", get(oidc_callback))
+        .route("/auth/signup", post(signup))
+        .route("/auth/invite/accept", post(accept_invite))
+        .route("/auth/verify-email", post(verify_email))
         // Git Smart-HTTP transport (real `git clone`/`fetch`/`push`). The `{repo_id}`
         // segment arrives as `R-<n>.git`; the handlers strip the `.git` suffix.
         .route(
@@ -626,19 +644,73 @@ fn request_token(headers: &HeaderMap) -> Option<String> {
     basic_auth_password(headers)
 }
 
-/// Resolves the request's token to a user and its scope, or 401.
+const SESSION_COOKIE: &str = "wiab_session";
+/// 7 days — matches the absolute session cap in the auth service.
+const SESSION_MAX_AGE_SECONDS: i64 = 604_800;
+
+/// The session cookie secret from the request's `Cookie` header, if present.
+fn session_cookie_value(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == SESSION_COOKIE)
+        .map(|(_, value)| value.to_owned())
+}
+
+/// `Set-Cookie` value installing the session cookie: `HttpOnly` (no JS access),
+/// `SameSite=Lax` (blocks cross-site state-changing requests — the current CSRF defense),
+/// `Path=/`, and `Secure` when served over https.
+fn set_session_cookie(secret: &str, secure: bool) -> String {
+    let mut cookie = format!(
+        "{SESSION_COOKIE}={secret}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}"
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn clear_session_cookie(secure: bool) -> String {
+    let mut cookie = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+/// Resolves the request to a user and its scope, or 401.
+///
+/// Precedence: a Bearer/Basic token first (console PATs, git, agents) — an explicit,
+/// scoped, CSRF-immune credential that machine clients always send. Otherwise a browser
+/// session cookie, which carries the user's full authority (unrestricted scope, like SSH
+/// key auth). Git and machine paths never reach the cookie branch, so they are unchanged.
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(UserId, TokenScope), (StatusCode, String)> {
-    let Some(token) = request_token(headers) else {
-        return Err(unauthorized());
-    };
-    let user_service = state.user_service.clone();
-    match user_service.resolve_token(&token).await.map_err(internal)? {
-        Some(resolved) => Ok(resolved),
-        None => Err(unauthorized()),
+    if let Some(token) = request_token(headers) {
+        return match state
+            .user_service
+            .resolve_token(&token)
+            .await
+            .map_err(internal)?
+        {
+            Some(resolved) => Ok(resolved),
+            None => Err(unauthorized()),
+        };
     }
+    if let Some(secret) = session_cookie_value(headers)
+        && let Some(resolved) = state
+            .auth_service
+            .resolve_session(&secret)
+            .await
+            .map_err(internal)?
+    {
+        let user_id: UserId = resolved.principal.as_str().parse().map_err(internal)?;
+        return Ok((user_id, TokenScope::unrestricted()));
+    }
+    Err(unauthorized())
 }
 
 /// Requires the caller be an Owner — the bar for managing users and grants.
@@ -719,6 +791,485 @@ async fn require_self_or_owner(
     let access = state.access_service.clone();
     let is_owner = access.is_owner(user).await.map_err(internal)?;
     if is_owner { Ok(()) } else { Err(forbidden()) }
+}
+
+#[derive(serde::Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(serde::Serialize)]
+struct CurrentUser {
+    id: String,
+    name: String,
+    email: Option<String>,
+    is_owner: bool,
+}
+
+#[derive(serde::Serialize)]
+struct LoginResponse {
+    user: CurrentUser,
+    /// Double-submit CSRF token the SPA echoes on unsafe requests. Enforcement is a
+    /// follow-up; `SameSite=Lax` on the cookie is the current CSRF defense.
+    csrf_token: String,
+}
+
+#[derive(serde::Serialize)]
+struct AuthConfigResponse {
+    local_password: bool,
+    signup: bool,
+    google: bool,
+    oidc: bool,
+}
+
+async fn current_user(
+    state: &AppState,
+    user_id: UserId,
+) -> Result<CurrentUser, (StatusCode, String)> {
+    let snapshot = state
+        .user_service
+        .user_snapshot(&user_id.to_string())
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| not_found("user", &user_id.to_string()))?;
+    let is_owner = state
+        .access_service
+        .is_owner(user_id)
+        .await
+        .map_err(internal)?;
+    Ok(CurrentUser {
+        id: snapshot.id,
+        name: snapshot.name,
+        email: snapshot.email,
+        is_owner,
+    })
+}
+
+/// Local email/password login: verifies credentials, establishes a session, sets the
+/// cookie, and returns the current user plus a CSRF token.
+async fn login(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let established = state
+        .auth_service
+        .login_with_password(&request.email, &request.password)
+        .await
+        .map_err(|error| match error {
+            AuthError::InvalidCredentials => unauthorized(),
+            other => internal(other),
+        })?;
+    let user_id = state
+        .user_service
+        .find_by_email(&request.email)
+        .await
+        .map_err(internal)?
+        .ok_or_else(unauthorized)?;
+    let user = current_user(&state, user_id).await?;
+    let cookie = set_session_cookie(
+        &established.cookie_secret,
+        state.auth_settings.cookie_secure,
+    );
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Json(LoginResponse {
+            user,
+            csrf_token: established.csrf_token,
+        }),
+    ))
+}
+
+/// The currently-authenticated user (resolved from session cookie or bearer token).
+async fn whoami(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CurrentUser>, (StatusCode, String)> {
+    let (user_id, _scope) = authenticate(&state, &headers).await?;
+    Ok(Json(current_user(&state, user_id).await?))
+}
+
+/// Revoke the current session and clear the cookie. Idempotent.
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if let Some(secret) = session_cookie_value(&headers) {
+        state.auth_service.logout(&secret).await.map_err(internal)?;
+    }
+    let cookie = clear_session_cookie(state.auth_settings.cookie_secure);
+    Ok(([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT))
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// Change the current user's password (re-verifies the current one). Self-service.
+async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let (user_id, _scope) = authenticate(&state, &headers).await?;
+    if request.new_password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters".to_owned(),
+        ));
+    }
+    state
+        .auth_service
+        .change_password(
+            PrincipalId::new(user_id.to_string()),
+            &request.current_password,
+            &request.new_password,
+        )
+        .await
+        .map_err(|error| match error {
+            AuthError::InvalidCredentials => (
+                StatusCode::BAD_REQUEST,
+                "current password is incorrect".to_owned(),
+            ),
+            other => internal(other),
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordResetRequestBody {
+    email: String,
+}
+
+/// Request a password-reset link. Always returns 202 (no account-existence disclosure).
+async fn password_reset_request(
+    State(state): State<AppState>,
+    Json(request): Json<PasswordResetRequestBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .password_reset_service
+        .request(&request.email)
+        .await
+        .map_err(internal)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordResetConfirmBody {
+    token: String,
+    new_password: String,
+}
+
+/// Set a new password using a reset token from the emailed link.
+async fn password_reset_confirm(
+    State(state): State<AppState>,
+    Json(request): Json<PasswordResetConfirmBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if request.new_password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters".to_owned(),
+        ));
+    }
+    state
+        .password_reset_service
+        .confirm(&request.token, &request.new_password)
+        .await
+        .map_err(|error| match error {
+            AuthError::InvalidCredentials => (
+                StatusCode::BAD_REQUEST,
+                "this reset link is invalid or has expired".to_owned(),
+            ),
+            other => internal(other),
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Which login methods the SPA should offer.
+async fn auth_config(State(state): State<AppState>) -> Json<AuthConfigResponse> {
+    Json(AuthConfigResponse {
+        local_password: true,
+        signup: state.auth_settings.signup_enabled,
+        google: state.auth_settings.google_enabled,
+        oidc: state.auth_settings.oidc_enabled,
+    })
+}
+
+/// Only same-origin relative paths are accepted as a post-login destination (no open
+/// redirect); anything else falls back to the console home.
+fn sanitize_return_to(next: Option<&str>) -> String {
+    match next {
+        Some(value) if value.starts_with('/') && !value.starts_with("//") => value.to_owned(),
+        _ => "/works".to_owned(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OidcStartQuery {
+    next: Option<String>,
+}
+
+/// Begin an OIDC login: redirect the browser to the IdP's authorization endpoint.
+async fn oidc_start(
+    State(state): State<AppState>,
+    Path(connection): Path<String>,
+    Query(query): Query<OidcStartQuery>,
+) -> Result<axum::response::Redirect, (StatusCode, String)> {
+    let Some(federation) = state.federation_service.clone() else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "federation is not enabled".to_owned(),
+        ));
+    };
+    let return_to = sanitize_return_to(query.next.as_deref());
+    let url = federation
+        .begin_login(&connection, &return_to)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(axum::response::Redirect::to(&url))
+}
+
+#[derive(serde::Deserialize)]
+struct OidcCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+/// Complete an OIDC login from the IdP callback: validate, resolve/provision the user,
+/// establish a session, and redirect to where the user was headed.
+async fn oidc_callback(
+    State(state): State<AppState>,
+    Path(connection): Path<String>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let Some(federation) = state.federation_service.clone() else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "federation is not enabled".to_owned(),
+        ));
+    };
+    if let Some(error) = query.error {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("identity provider error: {error}"),
+        ));
+    }
+    let (Some(code), Some(state_param)) = (query.code, query.state) else {
+        return Err((StatusCode::BAD_REQUEST, "missing code or state".to_owned()));
+    };
+    let (principal, return_to) = federation
+        .complete_login(&connection, &state_param, &code)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let established = state
+        .auth_service
+        .establish_session(principal)
+        .await
+        .map_err(internal)?;
+    let cookie = set_session_cookie(
+        &established.cookie_secret,
+        state.auth_settings.cookie_secure,
+    );
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        axum::response::Redirect::to(&return_to),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct InviteUserRequest {
+    email: String,
+    name: String,
+}
+
+/// Owner-only: create a pending user and email them an invite link to set a password.
+async fn invite_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<InviteUserRequest>,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let snapshot = state
+        .user_service
+        .create_pending_user(request.name, request.email.clone())
+        .await
+        .map_err(bad_request)?;
+    state
+        .invitation_service
+        .invite(&request.email, PrincipalId::new(snapshot.id.clone()))
+        .await
+        .map_err(internal)?;
+    Ok(Json(snapshot))
+}
+
+/// Owner-only: deactivate a user (bars login) and drop their sessions immediately.
+async fn deactivate_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let snapshot = state
+        .user_service
+        .deactivate_user(&user_id)
+        .await
+        .map_err(bad_request)?
+        .ok_or_else(|| not_found("user", &user_id))?;
+    state
+        .auth_service
+        .revoke_all_sessions(&PrincipalId::new(user_id))
+        .await
+        .map_err(internal)?;
+    Ok(Json(snapshot))
+}
+
+/// Owner-only: re-activate a deactivated user.
+async fn activate_user(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
+    require_owner(&state, &headers).await?;
+    let snapshot = state
+        .user_service
+        .activate_user(&user_id)
+        .await
+        .map_err(bad_request)?
+        .ok_or_else(|| not_found("user", &user_id))?;
+    Ok(Json(snapshot))
+}
+
+#[derive(serde::Deserialize)]
+struct SignupRequest {
+    email: String,
+    password: String,
+    name: String,
+}
+
+/// Self-service signup (off unless `WIAB_AUTH_LOCAL_SIGNUP`): create a pending user with a
+/// password and email a verification link. Always returns 202 (no account-existence leak).
+async fn signup(
+    State(state): State<AppState>,
+    Json(request): Json<SignupRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !state.auth_settings.signup_enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "self-service signup is disabled".to_owned(),
+        ));
+    }
+    if request.password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters".to_owned(),
+        ));
+    }
+    // A taken email is not reported — same 202 either way.
+    if let Ok(snapshot) = state
+        .user_service
+        .create_pending_user(request.name, request.email.clone())
+        .await
+    {
+        let principal = PrincipalId::new(snapshot.id);
+        state
+            .auth_service
+            .set_password(principal.clone(), &request.password)
+            .await
+            .map_err(internal)?;
+        state
+            .invitation_service
+            .send_email_verification(&request.email, principal)
+            .await
+            .map_err(internal)?;
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(serde::Deserialize)]
+struct AcceptInviteRequest {
+    token: String,
+    password: String,
+}
+
+/// Accept an invite: set the password, activate the user, and sign them in.
+async fn accept_invite(
+    State(state): State<AppState>,
+    Json(request): Json<AcceptInviteRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if request.password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters".to_owned(),
+        ));
+    }
+    let principal = state
+        .invitation_service
+        .accept_invite(&request.token, &request.password)
+        .await
+        .map_err(invite_error)?;
+    finish_activation(&state, principal).await
+}
+
+#[derive(serde::Deserialize)]
+struct VerifyEmailRequest {
+    token: String,
+}
+
+/// Confirm a signup email: activate the user and sign them in (password already set).
+async fn verify_email(
+    State(state): State<AppState>,
+    Json(request): Json<VerifyEmailRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let principal = state
+        .invitation_service
+        .verify_email(&request.token)
+        .await
+        .map_err(invite_error)?;
+    finish_activation(&state, principal).await
+}
+
+fn invite_error(error: AuthError) -> (StatusCode, String) {
+    match error {
+        AuthError::InvalidCredentials => (
+            StatusCode::BAD_REQUEST,
+            "this link is invalid or has expired".to_owned(),
+        ),
+        other => internal(other),
+    }
+}
+
+/// Activate the principal's user and establish a session (shared by invite-accept and
+/// email-verify, which both finish by signing the user in).
+async fn finish_activation(
+    state: &AppState,
+    principal: PrincipalId,
+) -> Result<([(axum::http::HeaderName, String); 1], Json<LoginResponse>), (StatusCode, String)> {
+    state
+        .user_service
+        .activate_user(principal.as_str())
+        .await
+        .map_err(internal)?;
+    let user_id: UserId = principal.as_str().parse().map_err(internal)?;
+    let established = state
+        .auth_service
+        .establish_session(principal)
+        .await
+        .map_err(internal)?;
+    let user = current_user(state, user_id).await?;
+    let cookie = set_session_cookie(
+        &established.cookie_secret,
+        state.auth_settings.cookie_secure,
+    );
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Json(LoginResponse {
+            user,
+            csrf_token: established.csrf_token,
+        }),
+    ))
 }
 
 async fn set_repo_visibility(

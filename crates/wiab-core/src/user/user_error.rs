@@ -8,6 +8,8 @@ pub enum UserError {
     InvalidUserId(String),
     #[error("'{0}' is not a valid user kind")]
     InvalidUserKind(String),
+    #[error("'{0}' is not a valid user state")]
+    InvalidUserState(String),
     #[error("ssh key label must be a non-empty trimmed string")]
     EmptySshKeyLabel,
     #[error("ssh key must be a non-empty public key")]

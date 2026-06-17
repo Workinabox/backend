@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 wiab-app = { workspace = true }
 wiab-core = { workspace = true }
+authbox-app = { workspace = true }
+authbox-core = { workspace = true }
+authbox-inf = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }

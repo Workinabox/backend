@@ -6,13 +6,24 @@ authors = ["Gos & co ApS"]
 license = "MIT"
 
 [workspace]
-members = ["crates/wiab-core", "crates/wiab-inf", "crates/wiab-app"]
+members = [
+    "crates/wiab-core",
+    "crates/wiab-inf",
+    "crates/wiab-app",
+    "crates/authbox-core",
+    "crates/authbox-app",
+    "crates/authbox-inf",
+]
 
 [workspace.dependencies]
 wiab-core = { path = "crates/wiab-core" }
 wiab-inf = { path = "crates/wiab-inf" }
 wiab-app = { path = "crates/wiab-app" }
+authbox-core = { path = "crates/authbox-core" }
+authbox-app = { path = "crates/authbox-app" }
+authbox-inf = { path = "crates/authbox-inf" }
 anyhow = "1.0.100"
+argon2 = "0.5"
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
@@ -22,9 +33,12 @@ deadpool-postgres = "0.14"
 flate2 = "1.0"
 futures-util = "0.3"
 git2 = "0.20"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 llama-cpp-2 = { version = "0.1.138", default-features = false }
 mediasoup = "0.20"
+openidconnect = { version = "4", default-features = false, features = ["reqwest"] }
 opus = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rand = "0.10"
 rcgen = "0.13"
 refinery = { version = "0.8", features = ["tokio-postgres"] }
@@ -47,6 +61,9 @@ whisper-rs = "0.16"
 wiab-app = { workspace = true }
 wiab-core = { workspace = true }
 wiab-inf = { workspace = true }
+authbox-app = { workspace = true }
+authbox-core = { workspace = true }
+authbox-inf = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }

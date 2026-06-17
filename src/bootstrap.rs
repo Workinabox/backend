@@ -1,6 +1,19 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use authbox_app::{
+    AuthenticationService, FederationService, InvitationService, PasswordResetService,
+    SessionConfig,
+};
+use authbox_core::auth::{EmailSender, FederationConnection, PrincipalId};
+use authbox_inf::{
+    Argon2idPasswordHasher, AuthFlowStoreImpl, CredentialStoreImpl, FederatedIdentityStoreImpl,
+    InMemoryAuthFlowStore, InMemoryCredentialStore, InMemoryFederatedIdentityStore,
+    InMemorySessionStore, InMemoryVerificationTokenStore, LoggingEmailSender, OidcRelyingParty,
+    PostgresAuthFlowStore, PostgresCredentialStore, PostgresFederatedIdentityStore,
+    PostgresSessionStore, PostgresVerificationTokenStore, RandomSecretGenerator, SessionStoreImpl,
+    SmtpEmailSender, VerificationTokenStoreImpl,
+};
 use tokio::sync::mpsc;
 use tracing::info;
 use wiab_app::{
@@ -24,7 +37,7 @@ use wiab_core::{
     work::WorkRepository,
 };
 use wiab_inf::{
-    AgentRepo, AppState, BoardRepo, DefaultSpeechSynthesizer, Git2Backend,
+    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, Git2Backend,
     HeuristicMeetingIntelligence, InMemoryAgentNumbering, InMemoryAgentRepository,
     InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
     InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
@@ -36,7 +49,8 @@ use wiab_inf::{
     PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
     PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresWorkRepository, ProjectRepo,
     RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
-    Sha256TokenHasher, SystemClock, UserRepo, WorkRepo, pg_pool,
+    Sha256TokenHasher, SystemClock, UserRepo, WiabAuthService, WiabUserDirectory, WorkRepo,
+    pg_pool,
 };
 
 pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::Result<AppState> {
@@ -66,6 +80,9 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
             pg_pool::run_migrations(&pool)
                 .await
                 .context("failed to apply database migrations")?;
+            authbox_inf::run_migrations(&pool)
+                .await
+                .context("failed to apply authbox migrations")?;
             info!("persistence backend: postgres");
             Some(pool)
         }
@@ -191,11 +208,42 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         project_repo.clone(),
     ));
 
+    // Reusable authentication (password login + browser sessions). Keyed on the user id, it
+    // resolves logins through the user service via `WiabUserDirectory` and persists its own
+    // sessions/credentials in the selected backend.
+    let session_store = match &pool {
+        Some(pool) => SessionStoreImpl::Postgres(PostgresSessionStore::new(pool.clone())),
+        None => SessionStoreImpl::InMemory(InMemorySessionStore::new()),
+    };
+    let credential_store = match &pool {
+        Some(pool) => CredentialStoreImpl::Postgres(PostgresCredentialStore::new(pool.clone())),
+        None => CredentialStoreImpl::InMemory(InMemoryCredentialStore::new()),
+    };
+    let auth_service = Arc::new(AuthenticationService::new(
+        session_store.clone(),
+        credential_store.clone(),
+        WiabUserDirectory::new(user_service.clone()),
+        Arc::new(Argon2idPasswordHasher),
+        Arc::new(RandomSecretGenerator),
+        Arc::new(Sha256TokenHasher),
+        Arc::new(SystemClock),
+        // 8-hour idle window, 7-day absolute cap.
+        SessionConfig {
+            idle_seconds: 28_800,
+            absolute_seconds: 604_800,
+        },
+    ));
+
     // Seed the default org + owner only when the store is empty, so a Postgres-backed
     // restart does not try to re-create them (which would fail the unique-id insert).
     if organization_service.list_organizations().await?.is_empty() {
         seed_default_organization(organization_service.as_ref(), project_service.as_ref()).await?;
-        seed_owner(user_service.as_ref(), access_service.as_ref()).await;
+        seed_owner(
+            user_service.as_ref(),
+            access_service.as_ref(),
+            auth_service.as_ref(),
+        )
+        .await;
     }
 
     let pipeline_repo = match &pool {
@@ -226,6 +274,151 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         Arc::new(work_numbering),
     ));
 
+    // HTTP auth configuration. Cookie `Secure` follows the base-url scheme so the dev
+    // HTTP origin still gets its cookie. Signup/Google/OIDC are opt-in (off by default).
+    let base_url =
+        std::env::var("WIAB_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_owned());
+    let auth_settings = AuthSettings {
+        cookie_secure: base_url.starts_with("https"),
+        signup_enabled: env_flag("WIAB_AUTH_LOCAL_SIGNUP"),
+        google_enabled: env_flag("WIAB_AUTH_GOOGLE_ENABLED"),
+        oidc_enabled: env_flag("WIAB_AUTH_OIDC_ENABLED"),
+        base_url,
+    };
+
+    // Inbound OIDC federation connections, built from env (off by default). Google and the
+    // enterprise IdP are the same relying-party path with different config.
+    let mut connections: Vec<FederationConnection> = Vec::new();
+    if auth_settings.google_enabled {
+        connections.push(FederationConnection {
+            slug: "google".to_owned(),
+            issuer: "https://accounts.google.com".to_owned(),
+            client_id: std::env::var("WIAB_GOOGLE_CLIENT_ID").unwrap_or_default(),
+            client_secret: std::env::var("WIAB_GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+            scopes: vec![
+                "openid".to_owned(),
+                "email".to_owned(),
+                "profile".to_owned(),
+            ],
+            redirect_uri: format!("{}/api/auth/oidc/google/callback", auth_settings.base_url),
+            auto_link_verified_email: false,
+        });
+    }
+    if auth_settings.oidc_enabled {
+        connections.push(FederationConnection {
+            slug: "enterprise".to_owned(),
+            issuer: std::env::var("WIAB_OIDC_ISSUER").unwrap_or_default(),
+            client_id: std::env::var("WIAB_OIDC_CLIENT_ID").unwrap_or_default(),
+            client_secret: std::env::var("WIAB_OIDC_CLIENT_SECRET").unwrap_or_default(),
+            scopes: vec![
+                "openid".to_owned(),
+                "email".to_owned(),
+                "profile".to_owned(),
+            ],
+            redirect_uri: format!(
+                "{}/api/auth/oidc/enterprise/callback",
+                auth_settings.base_url
+            ),
+            auto_link_verified_email: true,
+        });
+    }
+    let federation_service = if connections.is_empty() {
+        None
+    } else {
+        let federated_store = match &pool {
+            Some(pool) => FederatedIdentityStoreImpl::Postgres(
+                PostgresFederatedIdentityStore::new(pool.clone()),
+            ),
+            None => FederatedIdentityStoreImpl::InMemory(InMemoryFederatedIdentityStore::new()),
+        };
+        let flow_store = match &pool {
+            Some(pool) => AuthFlowStoreImpl::Postgres(PostgresAuthFlowStore::new(pool.clone())),
+            None => AuthFlowStoreImpl::InMemory(InMemoryAuthFlowStore::new()),
+        };
+        Some(Arc::new(FederationService::new(
+            federated_store,
+            flow_store,
+            WiabUserDirectory::new(user_service.clone()),
+            OidcRelyingParty::new(connections.clone()),
+            Arc::new(SystemClock),
+            connections,
+            // 10-minute login-state TTL.
+            600,
+        )))
+    };
+
+    // Forgotten-password reset: emails a single-use link. Uses SMTP when configured,
+    // otherwise logs the email so the link still shows up in the server log for dev.
+    let email_sender: Arc<dyn EmailSender> = match std::env::var("WIAB_SMTP_HOST") {
+        Ok(host) if !host.trim().is_empty() => {
+            let port = std::env::var("WIAB_SMTP_PORT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(587);
+            let username = std::env::var("WIAB_SMTP_USER")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let password = std::env::var("WIAB_SMTP_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let from = std::env::var("WIAB_SMTP_FROM")
+                .unwrap_or_else(|_| "no-reply@workinabox.local".to_owned());
+            match SmtpEmailSender::new(
+                &host,
+                port,
+                username,
+                password,
+                &from,
+                env_flag("WIAB_SMTP_TLS"),
+            ) {
+                Ok(sender) => {
+                    info!("email delivery: SMTP {host}:{port}");
+                    Arc::new(sender)
+                }
+                Err(error) => {
+                    info!("email delivery: SMTP config invalid ({error}); logging instead");
+                    Arc::new(LoggingEmailSender)
+                }
+            }
+        }
+        _ => {
+            info!("email delivery: logging only (set WIAB_SMTP_HOST to send real email)");
+            Arc::new(LoggingEmailSender)
+        }
+    };
+    let verification_store = match &pool {
+        Some(pool) => {
+            VerificationTokenStoreImpl::Postgres(PostgresVerificationTokenStore::new(pool.clone()))
+        }
+        None => VerificationTokenStoreImpl::InMemory(InMemoryVerificationTokenStore::new()),
+    };
+    let password_reset_service = Arc::new(PasswordResetService::new(
+        WiabUserDirectory::new(user_service.clone()),
+        verification_store.clone(),
+        credential_store.clone(),
+        session_store,
+        Arc::new(Argon2idPasswordHasher),
+        Arc::new(RandomSecretGenerator),
+        Arc::new(Sha256TokenHasher),
+        Arc::new(SystemClock),
+        email_sender.clone(),
+        auth_settings.base_url.clone(),
+        // 1-hour reset link.
+        3600,
+    ));
+    let invitation_service = Arc::new(InvitationService::new(
+        verification_store,
+        credential_store,
+        Arc::new(Argon2idPasswordHasher),
+        Arc::new(RandomSecretGenerator),
+        Arc::new(Sha256TokenHasher),
+        Arc::new(SystemClock),
+        email_sender,
+        auth_settings.base_url.clone(),
+        // 24-hour invite / email-verification link.
+        86_400,
+    ));
+
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<FinalizedTranscript>();
     let sfu = Arc::new(
         Sfu::new(meeting_service.clone(), transcript_tx)
@@ -242,11 +435,16 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         board_service,
         repo_service,
         user_service,
+        auth_service,
+        federation_service,
+        password_reset_service,
+        invitation_service,
         access_service,
         authorization_service,
         pipeline_service,
         work_service,
         sfu,
+        auth_settings,
         git_root,
         // Release builds inject WIAB_VERSION (the git tag) so the reported
         // version matches the release; local builds fall back to Cargo.toml.
@@ -258,6 +456,18 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
 /// restart instead of colliding with persisted ids. Returns 0 for an empty store.
 fn next_after<T>(items: &[T], number: impl Fn(&T) -> u64) -> u64 {
     items.iter().map(number).max().unwrap_or(0)
+}
+
+/// Reads a boolean env flag (`1`/`true`/`yes`/`on` = true), defaulting to false when unset.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 async fn seed_default_organization(
@@ -295,6 +505,7 @@ async fn seed_default_organization(
 async fn seed_owner(
     user_service: &UserApplicationService<UserRepo>,
     access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
+    auth_service: &WiabAuthService,
 ) {
     let owner = user_service
         .create_user(CreateUserRequest {
@@ -327,9 +538,17 @@ async fn seed_owner(
         .await
         .expect("failed to issue bootstrap token")
         .expect("seeded owner exists");
+    // Seed a password so a human can log in interactively (the bootstrap token above stays
+    // for machine/agent access). Dev-only default; override with WIAB_DEV_OWNER_PASSWORD.
+    let dev_password =
+        std::env::var("WIAB_DEV_OWNER_PASSWORD").unwrap_or_else(|_| "owner".to_owned());
+    auth_service
+        .set_password(PrincipalId::new(owner.id.clone()), &dev_password)
+        .await
+        .expect("failed to seed owner password");
     info!(
-        "seeded owner '{}' (Owner of O-1) — bootstrap access token: {}",
-        owner.id, issued.plaintext
+        "seeded owner '{}' (Owner of O-1) — login: owner@workinabox.local / {} — bootstrap access token: {}",
+        owner.id, dev_password, issued.plaintext
     );
 }
 

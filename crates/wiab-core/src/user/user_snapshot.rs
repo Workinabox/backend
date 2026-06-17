@@ -8,6 +8,8 @@ pub struct UserSnapshot {
     pub kind: String,
     pub name: String,
     pub email: Option<String>,
+    /// Lifecycle state: "active" | "pending" | "deactivated".
+    pub state: String,
     pub agent_id: Option<String>,
     pub ssh_keys: Vec<SshKeySnapshot>,
     pub tokens: Vec<TokenSnapshot>,

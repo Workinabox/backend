@@ -1,3 +1,5 @@
+use authbox_core::ResourceRef;
+
 use crate::access::AccessError;
 use crate::organization::OrganizationId;
 use crate::project::ProjectId;
@@ -57,6 +59,14 @@ impl Scope {
                 .map_err(|_| AccessError::InvalidScope(format!("{kind}:{id}"))),
             other => Err(AccessError::InvalidScope(other.to_owned())),
         }
+    }
+}
+
+/// A scope renders to the generic `(kind, id)` resource reference the RBAC core works in
+/// terms of — the same pair carried on a role assignment's `(scope_kind, scope_id)`.
+impl From<Scope> for ResourceRef {
+    fn from(scope: Scope) -> Self {
+        ResourceRef::new(scope.kind(), scope.id_string())
     }
 }
 

@@ -4,13 +4,15 @@ use wiab_core::organization::OrganizationId;
 use wiab_core::repo::RepoId;
 use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::user::{
-    AccessToken, SshKey, SshKeyId, TokenId, TokenScope, User, UserId, UserKind, UserRepository,
+    AccessToken, ExternalRef, SshKey, SshKeyId, TokenId, TokenScope, User, UserId, UserKind,
+    UserRepository, UserState,
 };
 
 /// PostgreSQL-backed user repository. One row per aggregate in `app_user`, guarded by an
-/// optimistic-concurrency `version` column, with owned SSH keys and access tokens stored
-/// in the `user_ssh_key` and `user_access_token` child tables. Each save rewrites the
-/// child rows inside the same transaction as the parent's version CAS.
+/// optimistic-concurrency `version` column, with owned external refs, SSH keys, and access
+/// tokens stored in the `user_external_ref`, `user_ssh_key`, and `user_access_token` child
+/// tables. Each save rewrites the child rows inside the same transaction as the parent's
+/// version CAS.
 #[derive(Clone)]
 pub struct PostgresUserRepository {
     pool: Pool,
@@ -85,29 +87,35 @@ impl UserRepository for PostgresUserRepository {
         let next_version = next.value() as i64;
         let kind = user.kind().to_string();
         let email = user.email().map(|email| email.to_owned());
-        let agent_id = user.agent_id().map(|agent_id| agent_id.to_string());
 
         let tx = client.transaction().await.map_err(save_error)?;
 
         let rows = if expected == Version::NEW {
             tx.execute(
-                "INSERT INTO app_user (id, version, kind, name, email, agent_id) \
+                "INSERT INTO app_user (id, version, kind, name, email, state) \
                  VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
-                &[&id, &next_version, &kind, &user.name(), &email, &agent_id],
-            )
-            .await
-            .map_err(save_error)?
-        } else {
-            tx.execute(
-                "UPDATE app_user SET version = $2, kind = $3, name = $4, email = $5, \
-                 agent_id = $6 WHERE id = $1 AND version = $7",
                 &[
                     &id,
                     &next_version,
                     &kind,
                     &user.name(),
                     &email,
-                    &agent_id,
+                    &user.state().as_str(),
+                ],
+            )
+            .await
+            .map_err(save_error)?
+        } else {
+            tx.execute(
+                "UPDATE app_user SET version = $2, kind = $3, name = $4, email = $5, \
+                 state = $6 WHERE id = $1 AND version = $7",
+                &[
+                    &id,
+                    &next_version,
+                    &kind,
+                    &user.name(),
+                    &email,
+                    &user.state().as_str(),
                     &(expected.value() as i64),
                 ],
             )
@@ -117,6 +125,24 @@ impl UserRepository for PostgresUserRepository {
         if rows == 0 {
             // tx drops without commit -> rolled back.
             return Err(SaveError::Conflict);
+        }
+
+        tx.execute("DELETE FROM user_external_ref WHERE user_id = $1", &[&id])
+            .await
+            .map_err(save_error)?;
+        for (position, reference) in user.external_refs().iter().enumerate() {
+            tx.execute(
+                "INSERT INTO user_external_ref (user_id, position, system, ref_id) \
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &id,
+                    &(position as i32),
+                    &reference.system(),
+                    &reference.id(),
+                ],
+            )
+            .await
+            .map_err(save_error)?;
         }
 
         tx.execute("DELETE FROM user_ssh_key WHERE user_id = $1", &[&id])
@@ -176,7 +202,7 @@ impl UserRepository for PostgresUserRepository {
         let id_str = id.to_string();
         let row = client
             .query_opt(
-                "SELECT version, kind, name, email, agent_id FROM app_user WHERE id = $1",
+                "SELECT version, kind, name, email, state FROM app_user WHERE id = $1",
                 &[&id_str],
             )
             .await
@@ -188,23 +214,31 @@ impl UserRepository for PostgresUserRepository {
         let kind: String = row.get(1);
         let name: String = row.get(2);
         let email: Option<String> = row.get(3);
-        let agent_id: Option<String> = row.get(4);
+        let state: String = row.get(4);
         let kind: UserKind = kind.parse().map_err(repo_error)?;
-        let agent_id = agent_id
-            .map(|agent_id| agent_id.parse().map_err(repo_error))
-            .transpose()?;
+        let state: UserState = state.parse().map_err(repo_error)?;
 
+        let external_refs = load_external_refs(&client, &id_str).await?;
         let ssh_keys = load_ssh_keys(&client, &id_str).await?;
         let tokens = load_tokens(&client, &id_str).await?;
 
-        let user = User::from_persistence(*id, kind, name, email, agent_id, ssh_keys, tokens);
+        let user = User::from_persistence(
+            *id,
+            kind,
+            name,
+            email,
+            state,
+            external_refs,
+            ssh_keys,
+            tokens,
+        );
         Ok(Some((user, Version::from_value(version as u64))))
     }
 
     async fn list(&self) -> Result<Vec<User>, RepoError> {
         let client = self.pool.get().await.map_err(repo_error)?;
         let rows = client
-            .query("SELECT id, kind, name, email, agent_id FROM app_user", &[])
+            .query("SELECT id, kind, name, email, state FROM app_user", &[])
             .await
             .map_err(repo_error)?;
         let mut users = Vec::with_capacity(rows.len());
@@ -214,21 +248,49 @@ impl UserRepository for PostgresUserRepository {
             let kind: String = row.get(1);
             let name: String = row.get(2);
             let email: Option<String> = row.get(3);
-            let agent_id: Option<String> = row.get(4);
+            let state: String = row.get(4);
             let kind: UserKind = kind.parse().map_err(repo_error)?;
-            let agent_id = agent_id
-                .map(|agent_id| agent_id.parse().map_err(repo_error))
-                .transpose()?;
+            let state: UserState = state.parse().map_err(repo_error)?;
 
+            let external_refs = load_external_refs(&client, &id_str).await?;
             let ssh_keys = load_ssh_keys(&client, &id_str).await?;
             let tokens = load_tokens(&client, &id_str).await?;
 
             users.push(User::from_persistence(
-                id, kind, name, email, agent_id, ssh_keys, tokens,
+                id,
+                kind,
+                name,
+                email,
+                state,
+                external_refs,
+                ssh_keys,
+                tokens,
             ));
         }
         Ok(users)
     }
+}
+
+async fn load_external_refs(
+    client: &deadpool_postgres::Client,
+    user_id: &str,
+) -> Result<Vec<ExternalRef>, RepoError> {
+    let rows = client
+        .query(
+            "SELECT system, ref_id FROM user_external_ref \
+             WHERE user_id = $1 ORDER BY position",
+            &[&user_id],
+        )
+        .await
+        .map_err(repo_error)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let system: String = row.get(0);
+            let ref_id: String = row.get(1);
+            ExternalRef::new(system, ref_id)
+        })
+        .collect())
 }
 
 async fn load_ssh_keys(
