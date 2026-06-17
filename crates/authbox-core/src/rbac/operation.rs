@@ -1,4 +1,4 @@
-use crate::access::Role;
+use crate::rbac::Role;
 
 /// An action a request wants to perform on a resource, mapped to the minimum role it needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7,9 +7,9 @@ pub enum Operation {
     Read,
     /// Push / commit.
     Write,
-    /// Change repo settings (e.g. visibility).
+    /// Change resource settings (e.g. visibility).
     Administer,
-    /// Manage the org and its members.
+    /// Manage the owning scope and its members.
     Own,
 }
 

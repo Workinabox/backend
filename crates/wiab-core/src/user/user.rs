@@ -1,6 +1,6 @@
-use crate::agent::AgentId;
 use crate::user::{
-    AccessToken, SshKey, SshKeyId, TokenId, UserError, UserId, UserKind, UserSnapshot,
+    AccessToken, ExternalRef, SshKey, SshKeyId, TokenId, UserError, UserId, UserKind, UserSnapshot,
+    UserState,
 };
 
 /// A user: an identity that authenticates (human or agent) and owns its credentials.
@@ -10,7 +10,8 @@ pub struct User {
     kind: UserKind,
     name: String,
     email: Option<String>,
-    agent_id: Option<AgentId>,
+    state: UserState,
+    external_refs: Vec<ExternalRef>,
     ssh_keys: Vec<SshKey>,
     tokens: Vec<AccessToken>,
 }
@@ -21,7 +22,6 @@ impl User {
         kind: UserKind,
         name: String,
         email: Option<String>,
-        agent_id: Option<AgentId>,
     ) -> Result<Self, UserError> {
         if name.trim().is_empty() {
             return Err(UserError::EmptyName);
@@ -31,7 +31,8 @@ impl User {
             kind,
             name,
             email,
-            agent_id,
+            state: UserState::Active,
+            external_refs: Vec::new(),
             ssh_keys: Vec::new(),
             tokens: Vec::new(),
         })
@@ -45,7 +46,8 @@ impl User {
         kind: UserKind,
         name: String,
         email: Option<String>,
-        agent_id: Option<AgentId>,
+        state: UserState,
+        external_refs: Vec<ExternalRef>,
         ssh_keys: Vec<SshKey>,
         tokens: Vec<AccessToken>,
     ) -> User {
@@ -54,7 +56,8 @@ impl User {
             kind,
             name,
             email,
-            agent_id,
+            state,
+            external_refs,
             ssh_keys,
             tokens,
         }
@@ -84,8 +87,43 @@ impl User {
         &self.name
     }
 
-    pub fn agent_id(&self) -> Option<AgentId> {
-        self.agent_id
+    pub fn external_refs(&self) -> &[ExternalRef] {
+        &self.external_refs
+    }
+
+    /// The id this user is linked to in `system`, if any (e.g. its agent id under `"agent"`).
+    pub fn external_ref(&self, system: &str) -> Option<&str> {
+        self.external_refs
+            .iter()
+            .find(|reference| reference.system() == system)
+            .map(|reference| reference.id())
+    }
+
+    pub fn add_external_ref(&mut self, reference: ExternalRef) {
+        self.external_refs.push(reference);
+    }
+
+    pub fn state(&self) -> UserState {
+        self.state
+    }
+
+    /// Whether the user may authenticate. `Pending` (invited/unverified) and `Deactivated`
+    /// users cannot.
+    pub fn is_active(&self) -> bool {
+        self.state == UserState::Active
+    }
+
+    /// Mark the user pending — invited but not accepted, or signed up but not yet verified.
+    pub fn mark_pending(&mut self) {
+        self.state = UserState::Pending;
+    }
+
+    pub fn activate(&mut self) {
+        self.state = UserState::Active;
+    }
+
+    pub fn deactivate(&mut self) {
+        self.state = UserState::Deactivated;
     }
 
     pub fn add_ssh_key(&mut self, key: SshKey) {
@@ -138,7 +176,8 @@ impl User {
             kind: self.kind.to_string(),
             name: self.name.clone(),
             email: self.email.clone(),
-            agent_id: self.agent_id.map(|id| id.to_string()),
+            state: self.state.to_string(),
+            agent_id: self.external_ref("agent").map(|id| id.to_owned()),
             ssh_keys: self.ssh_keys.iter().map(|key| key.snapshot()).collect(),
             tokens: self.tokens.iter().map(|token| token.snapshot()).collect(),
         }
@@ -156,7 +195,6 @@ mod tests {
             UserKind::Human,
             "Ada".to_owned(),
             Some("ada@example.com".to_owned()),
-            None,
         )
         .unwrap()
     }
@@ -191,7 +229,6 @@ mod tests {
                 UserId::from_number(1),
                 UserKind::Human,
                 "  ".to_owned(),
-                None,
                 None
             )
             .unwrap_err(),
@@ -200,23 +237,38 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_transitions_gate_activity() {
+        let mut user = user();
+        assert!(user.is_active());
+        assert_eq!(user.snapshot().state, "active");
+        user.mark_pending();
+        assert!(!user.is_active());
+        assert_eq!(user.snapshot().state, "pending");
+        user.deactivate();
+        assert!(!user.is_active());
+        user.activate();
+        assert!(user.is_active());
+    }
+
+    #[test]
     fn exposes_identity_fields() {
         let human = user();
         assert_eq!(human.id(), UserId::from_number(1));
         assert_eq!(human.kind(), UserKind::Human);
         assert_eq!(human.name(), "Ada");
-        assert!(human.agent_id().is_none());
+        assert!(human.external_ref("agent").is_none());
 
-        let agent = User::new(
+        let mut agent = User::new(
             UserId::from_number(2),
             UserKind::Agent,
             "bot".to_owned(),
             None,
-            Some(AgentId::from_number(9)),
         )
         .unwrap();
+        agent.add_external_ref(ExternalRef::new("agent", "A-9"));
         assert_eq!(agent.kind(), UserKind::Agent);
-        assert_eq!(agent.agent_id(), Some(AgentId::from_number(9)));
+        assert_eq!(agent.external_ref("agent"), Some("A-9"));
+        assert_eq!(agent.snapshot().agent_id.as_deref(), Some("A-9"));
     }
 
     #[test]
@@ -280,7 +332,8 @@ mod tests {
             UserKind::Agent,
             "bot".to_owned(),
             Some("bot@example.com".to_owned()),
-            Some(AgentId::from_number(9)),
+            UserState::Active,
+            vec![ExternalRef::new("agent", "A-9")],
             vec![key],
             vec![token],
         );
@@ -288,7 +341,7 @@ mod tests {
         assert_eq!(user.kind(), UserKind::Agent);
         assert_eq!(user.name(), "bot");
         assert_eq!(user.email(), Some("bot@example.com"));
-        assert_eq!(user.agent_id(), Some(AgentId::from_number(9)));
+        assert_eq!(user.external_ref("agent"), Some("A-9"));
         assert_eq!(user.ssh_keys().len(), 1);
         assert_eq!(user.ssh_keys()[0].id(), key_id);
         assert_eq!(user.tokens().len(), 1);
@@ -302,12 +355,13 @@ mod tests {
             UserKind::Human,
             "Ada".to_owned(),
             None,
-            None,
+            UserState::Active,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );
         assert!(user.email().is_none());
-        assert!(user.agent_id().is_none());
+        assert!(user.external_refs().is_empty());
         assert!(user.ssh_keys().is_empty());
         assert!(user.tokens().is_empty());
     }

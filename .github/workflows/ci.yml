@@ -76,6 +76,25 @@ jobs:
       image: rust:1.92-bookworm
     permissions:
       contents: read
+    services:
+      # Real backends for the `--ignored` integration tests (Postgres migrations +
+      # persistence, SMTP delivery, OIDC round-trip). Reached by service label from the job
+      # container.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wiab
+          POSTGRES_PASSWORD: wiab
+          POSTGRES_DB: wiab
+        options: >-
+          --health-cmd "pg_isready -U wiab -d wiab"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mailpit:
+        image: axllent/mailpit
+      oidc-mock:
+        image: ghcr.io/navikt/mock-oauth2-server:2.1.10
     steps:
       - uses: actions/checkout@v4
 
@@ -118,6 +137,16 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Run integration tests (Postgres migrations + persistence, Mailpit, mock OIDC)
+        env:
+          DATABASE_URL: postgres://wiab:wiab@postgres:5432/wiab
+          MAILPIT_SMTP_HOST: mailpit
+          MAILPIT_API: http://mailpit:8025
+          OIDC_MOCK_ISSUER: http://oidc-mock:8080/default
+        run: |
+          cargo test -p wiab-inf --test postgres_integration -- --ignored
+          cargo test -p authbox-inf --test smtp_mailpit --test oidc_mock -- --ignored
 
   coverage:
     name: Coverage

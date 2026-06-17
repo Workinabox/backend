@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::access::{AccessError, Operation};
+use crate::rbac::{Operation, RoleError};
 
 /// An access role, ordered Read < Write < Admin < Owner. A higher role includes the
 /// powers of every lower one (the derived `Ord` follows declaration order).
@@ -36,7 +36,7 @@ impl fmt::Display for Role {
 }
 
 impl FromStr for Role {
-    type Err = AccessError;
+    type Err = RoleError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
@@ -44,7 +44,7 @@ impl FromStr for Role {
             "write" => Ok(Role::Write),
             "admin" => Ok(Role::Admin),
             "owner" => Ok(Role::Owner),
-            other => Err(AccessError::InvalidRole(other.to_owned())),
+            other => Err(RoleError::Invalid(other.to_owned())),
         }
     }
 }

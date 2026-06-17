@@ -1,5 +1,5 @@
-//! Infrastructure seams for credential crypto the domain can't carry itself (random
-//! generation, hashing, SSH-key fingerprinting). Ports here; impls in the infra layer.
+//! Credential crypto seams the domain can't carry itself. Ports here; impls in the infra
+//! layer.
 
 /// A freshly generated token: the one-time plaintext and a non-secret display string.
 pub struct GeneratedToken {
@@ -7,7 +7,7 @@ pub struct GeneratedToken {
     pub display: String,
 }
 
-/// Mints new access-token plaintexts (e.g. `wiab_pat_…` + random + checksum).
+/// Mints new access-token plaintexts (a product-specific prefix + random body + checksum).
 pub trait TokenFactory: Send + Sync {
     fn generate(&self) -> GeneratedToken;
 }

@@ -7,8 +7,9 @@ use wiab_core::organization::OrganizationId;
 use wiab_core::repo::RepoId;
 use wiab_core::repository::{SaveError, Version};
 use wiab_core::user::{
-    AccessToken, KeyFingerprinter, SshKey, SshKeyId, TokenFactory, TokenHasher, TokenId,
-    TokenScope, User, UserError, UserId, UserKind, UserNumbering, UserRepository, UserSnapshot,
+    AccessToken, ExternalRef, KeyFingerprinter, SshKey, SshKeyId, TokenFactory, TokenHasher,
+    TokenId, TokenScope, User, UserError, UserId, UserKind, UserNumbering, UserRepository,
+    UserSnapshot,
 };
 
 use crate::user_requests::{
@@ -60,33 +61,87 @@ impl<U: UserRepository> UserApplicationService<U> {
             .map(|(user, _)| user.snapshot()))
     }
 
+    /// Resolve a login email to its user id, if one exists **and is active**. Used by the
+    /// auth layer's directory — pending (invited/unverified) and deactivated users cannot
+    /// authenticate, so they resolve to `None`.
+    pub async fn find_by_email(&self, email: &str) -> anyhow::Result<Option<UserId>> {
+        let users = self.user_repository.list().await?;
+        Ok(users
+            .into_iter()
+            .find(|user| user.is_active() && user.email() == Some(email))
+            .map(|user| user.id()))
+    }
+
     pub async fn create_user(&self, request: CreateUserRequest) -> anyhow::Result<UserSnapshot> {
         let kind: UserKind = request.kind.parse()?;
-        let user = User::new(
-            self.numbering.next(),
-            kind,
-            request.name,
-            request.email,
-            None,
-        )?;
+        let user = User::new(self.numbering.next(), kind, request.name, request.email)?;
         let snapshot = user.snapshot();
         self.user_repository.save(user, Version::NEW).await?;
         Ok(snapshot)
     }
 
-    /// Creates the `User` identity for an agent. Used when an agent is created.
+    /// Create a human user in the `Pending` state (invited, or signed up but not yet
+    /// verified), with no password. Rejects a duplicate email in any state.
+    pub async fn create_pending_user(
+        &self,
+        name: String,
+        email: String,
+    ) -> anyhow::Result<UserSnapshot> {
+        if self
+            .user_repository
+            .list()
+            .await?
+            .iter()
+            .any(|user| user.email() == Some(email.as_str()))
+        {
+            return Err(anyhow!("a user with that email already exists"));
+        }
+        let mut user = User::new(self.numbering.next(), UserKind::Human, name, Some(email))?;
+        user.mark_pending();
+        let snapshot = user.snapshot();
+        self.user_repository.save(user, Version::NEW).await?;
+        Ok(snapshot)
+    }
+
+    /// Activate a user (e.g. after they accept an invite or verify their email).
+    pub async fn activate_user(&self, user_id: &str) -> anyhow::Result<Option<UserSnapshot>> {
+        self.transition(user_id, User::activate).await
+    }
+
+    /// Deactivate a user — keeps their record and role grants but bars them from logging in.
+    pub async fn deactivate_user(&self, user_id: &str) -> anyhow::Result<Option<UserSnapshot>> {
+        self.transition(user_id, User::deactivate).await
+    }
+
+    async fn transition(
+        &self,
+        user_id: &str,
+        apply: impl Fn(&mut User),
+    ) -> anyhow::Result<Option<UserSnapshot>> {
+        let id: UserId = user_id.parse()?;
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            apply(&mut user);
+            let snapshot = user.snapshot();
+            match self.user_repository.save(user, version).await {
+                Ok(_) => return Ok(Some(snapshot)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
+    }
+
+    /// Creates the `User` identity for an agent. Used when an agent is created. The agent
+    /// link is recorded as an external reference under the `"agent"` system.
     pub async fn provision_agent_user(
         &self,
         name: String,
         agent_id: AgentId,
     ) -> anyhow::Result<UserSnapshot> {
-        let user = User::new(
-            self.numbering.next(),
-            UserKind::Agent,
-            name,
-            None,
-            Some(agent_id),
-        )?;
+        let mut user = User::new(self.numbering.next(), UserKind::Agent, name, None)?;
+        user.add_external_ref(ExternalRef::new("agent", agent_id.to_string()));
         let snapshot = user.snapshot();
         self.user_repository.save(user, Version::NEW).await?;
         Ok(snapshot)
