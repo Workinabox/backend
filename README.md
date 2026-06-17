@@ -12,6 +12,18 @@ The backend is a Rust service built on Tokio and Axum. It currently provides:
 - a mediasoup-based SFU for real-time audio
 - optional local speech-to-text using Whisper
 
+## Running locally
+
+To run the full stack (Postgres + backend + frontend) together with Docker Compose, see
+[`dev/local/README.md`](../dev/local/README.md) in the sibling `dev` repo:
+
+```sh
+docker compose -f dev/local/docker-compose.yml up
+```
+
+For backend-only iteration against a Dockerized Postgres, [`scripts/run-pg.sh`](scripts/run-pg.sh)
+starts the database in Docker and runs the backend on the host with `cargo run`.
+
 ## Environment variables
 
 ### Speech-to-text (optional)

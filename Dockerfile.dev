@@ -1,0 +1,36 @@
+# Local-development image for the wiab backend.
+#
+# Production ships a binary release (see iac/); this image is only for the local stack in
+# dev/local/docker-compose.yml. It installs the Rust toolchain plus the native build
+# dependencies, then runs `cargo run` against the bind-mounted source. Compiled output and
+# the cargo registry live in named volumes, so only the first build is slow.
+FROM rust:1.92-bookworm
+
+# Native build dependencies (same set CI installs in .github/workflows). git is required on
+# PATH at runtime for the git hosting transport; curl is used by the compose healthcheck.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        cmake \
+        libopus-dev \
+        pkg-config \
+        python3 \
+        python3-pip \
+        git \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# rustfmt is required at build time: mediasoup-sys's build script formats generated
+# flatbuffers code through it (CI adds it the same way before building).
+RUN rustup component add rustfmt
+
+# Lets the cmake-based native deps (llama.cpp, whisper) configure under modern cmake,
+# matching the backend release build.
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
+
+WORKDIR /app
+
+# Source is bind-mounted at runtime (see docker-compose.yml); nothing is copied into the image.
+CMD ["cargo", "run"]
