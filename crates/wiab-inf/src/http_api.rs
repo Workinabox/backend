@@ -2,9 +2,10 @@ use authbox_core::auth::{AuthError, PrincipalId};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, State, ws::WebSocketUpgrade},
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    extract::{Path, Query, Request, State, ws::WebSocketUpgrade},
+    http::{HeaderMap, Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{AppendHeaders, IntoResponse, Response},
     routing::{delete, get, post, put},
 };
 use base64::Engine;
@@ -146,6 +147,7 @@ pub fn router(state: AppState) -> Router {
             post(unfulfill_done),
         )
         .route("/signal", get(signal))
+        .layer(middleware::from_fn_with_state(state.clone(), csrf_guard))
         .with_state(state)
 }
 
@@ -679,6 +681,83 @@ fn clear_session_cookie(secure: bool) -> String {
     cookie
 }
 
+const CSRF_COOKIE: &str = "wiab_csrf";
+const CSRF_HEADER: &str = "x-csrf-token";
+
+/// `Set-Cookie` for the CSRF token. Deliberately **not** `HttpOnly` — the SPA reads it and
+/// echoes it in the `X-CSRF-Token` header (double-submit). It is not a session secret, and
+/// it persists across reloads so the SPA still has it after a refresh.
+fn set_csrf_cookie(token: &str, secure: bool) -> String {
+    let mut cookie =
+        format!("{CSRF_COOKIE}={token}; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}");
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn clear_csrf_cookie(secure: bool) -> String {
+    let mut cookie = format!("{CSRF_COOKIE}=; SameSite=Lax; Path=/; Max-Age=0");
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+/// Identity-establishing endpoints can't carry a prior session's CSRF token (the caller has
+/// no session yet, or is recovering access via a single-use token / credentials), so they are
+/// exempt. Every other cookie-authenticated, state-changing request must present a valid token.
+fn csrf_exempt(method: &Method, path: &str) -> bool {
+    *method == Method::POST
+        && matches!(
+            path,
+            "/auth/session"
+                | "/auth/signup"
+                | "/auth/password/reset/request"
+                | "/auth/password/reset/confirm"
+                | "/auth/invite/accept"
+                | "/auth/verify-email"
+        )
+}
+
+/// Enforces double-submit CSRF on cookie-authenticated, state-changing requests. Bearer/Basic
+/// callers (PATs, git, agents) are exempt — they send no cookie and aren't CSRF-prone. Safe
+/// methods and the identity-establishing endpoints are exempt. The SPA echoes the readable
+/// `wiab_csrf` cookie in `X-CSRF-Token`; it must hash to the session's stored CSRF hash.
+async fn csrf_guard(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    let is_unsafe = !matches!(
+        request.method().as_str(),
+        "GET" | "HEAD" | "OPTIONS" | "TRACE"
+    );
+    if is_unsafe
+        && request_token(request.headers()).is_none()
+        && !csrf_exempt(request.method(), request.uri().path())
+        && let Some(secret) = session_cookie_value(request.headers())
+        && let Some(resolved) = state
+            .auth_service
+            .resolve_session(&secret)
+            .await
+            .map_err(internal)?
+    {
+        let presented = request
+            .headers()
+            .get(CSRF_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !state.auth_service.csrf_matches(&resolved, presented) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "missing or invalid CSRF token".to_owned(),
+            ));
+        }
+    }
+    Ok(next.run(request).await)
+}
+
 /// Resolves the request to a user and its scope, or 401.
 ///
 /// Precedence: a Bearer/Basic token first (console PATs, git, agents) — an explicit,
@@ -810,8 +889,8 @@ struct CurrentUser {
 #[derive(serde::Serialize)]
 struct LoginResponse {
     user: CurrentUser,
-    /// Double-submit CSRF token the SPA echoes on unsafe requests. Enforcement is a
-    /// follow-up; `SameSite=Lax` on the cookie is the current CSRF defense.
+    /// Double-submit CSRF token the SPA echoes in `X-CSRF-Token` on unsafe requests; also
+    /// set as the readable `wiab_csrf` cookie. `csrf_guard` enforces it on cookie-authed writes.
     csrf_token: String,
 }
 
@@ -867,12 +946,16 @@ async fn login(
         .map_err(internal)?
         .ok_or_else(unauthorized)?;
     let user = current_user(&state, user_id).await?;
+    let csrf_cookie = set_csrf_cookie(&established.csrf_token, state.auth_settings.cookie_secure);
     let cookie = set_session_cookie(
         &established.cookie_secret,
         state.auth_settings.cookie_secure,
     );
     Ok((
-        [(header::SET_COOKIE, cookie)],
+        AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::SET_COOKIE, csrf_cookie),
+        ]),
         Json(LoginResponse {
             user,
             csrf_token: established.csrf_token,
@@ -898,7 +981,14 @@ async fn logout(
         state.auth_service.logout(&secret).await.map_err(internal)?;
     }
     let cookie = clear_session_cookie(state.auth_settings.cookie_secure);
-    Ok(([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT))
+    let csrf_cookie = clear_csrf_cookie(state.auth_settings.cookie_secure);
+    Ok((
+        AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::SET_COOKIE, csrf_cookie),
+        ]),
+        StatusCode::NO_CONTENT,
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -1069,12 +1159,16 @@ async fn oidc_callback(
         .establish_session(principal)
         .await
         .map_err(internal)?;
+    let csrf_cookie = set_csrf_cookie(&established.csrf_token, state.auth_settings.cookie_secure);
     let cookie = set_session_cookie(
         &established.cookie_secret,
         state.auth_settings.cookie_secure,
     );
     Ok((
-        [(header::SET_COOKIE, cookie)],
+        AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::SET_COOKIE, csrf_cookie),
+        ]),
         axum::response::Redirect::to(&return_to),
     ))
 }
@@ -1246,7 +1340,13 @@ fn invite_error(error: AuthError) -> (StatusCode, String) {
 async fn finish_activation(
     state: &AppState,
     principal: PrincipalId,
-) -> Result<([(axum::http::HeaderName, String); 1], Json<LoginResponse>), (StatusCode, String)> {
+) -> Result<
+    (
+        AppendHeaders<[(axum::http::HeaderName, String); 2]>,
+        Json<LoginResponse>,
+    ),
+    (StatusCode, String),
+> {
     state
         .user_service
         .activate_user(principal.as_str())
@@ -1259,12 +1359,16 @@ async fn finish_activation(
         .await
         .map_err(internal)?;
     let user = current_user(state, user_id).await?;
+    let csrf_cookie = set_csrf_cookie(&established.csrf_token, state.auth_settings.cookie_secure);
     let cookie = set_session_cookie(
         &established.cookie_secret,
         state.auth_settings.cookie_secure,
     );
     Ok((
-        [(header::SET_COOKIE, cookie)],
+        AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::SET_COOKIE, csrf_cookie),
+        ]),
         Json(LoginResponse {
             user,
             csrf_token: established.csrf_token,
@@ -1610,4 +1714,30 @@ fn not_found(what: &str, id: &str) -> (StatusCode, String) {
 
 async fn signal(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_signal_socket(state.sfu, socket))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csrf_exemptions_cover_only_identity_establishing_posts() {
+        // Exempt: endpoints that establish/recover identity without a prior session.
+        for path in [
+            "/auth/session",
+            "/auth/signup",
+            "/auth/password/reset/request",
+            "/auth/password/reset/confirm",
+            "/auth/invite/accept",
+            "/auth/verify-email",
+        ] {
+            assert!(csrf_exempt(&Method::POST, path), "{path} should be exempt");
+        }
+        // Authenticated mutations must carry a CSRF token — never exempt.
+        assert!(!csrf_exempt(&Method::PUT, "/auth/password"));
+        assert!(!csrf_exempt(&Method::DELETE, "/auth/session"));
+        assert!(!csrf_exempt(&Method::POST, "/users"));
+        // The exemption is POST-only.
+        assert!(!csrf_exempt(&Method::GET, "/auth/session"));
+    }
 }

@@ -21,6 +21,7 @@ mod postgres_federated_identity_store;
 mod postgres_session_store;
 mod postgres_verification_token_store;
 mod random_secret_generator;
+mod resend_email_sender;
 mod smtp_email_sender;
 mod store_dispatch;
 
@@ -39,6 +40,7 @@ pub use postgres_federated_identity_store::PostgresFederatedIdentityStore;
 pub use postgres_session_store::PostgresSessionStore;
 pub use postgres_verification_token_store::PostgresVerificationTokenStore;
 pub use random_secret_generator::RandomSecretGenerator;
+pub use resend_email_sender::ResendEmailSender;
 pub use smtp_email_sender::SmtpEmailSender;
 pub use store_dispatch::{
     AuthFlowStoreImpl, CredentialStoreImpl, FederatedIdentityStoreImpl, SessionStoreImpl,

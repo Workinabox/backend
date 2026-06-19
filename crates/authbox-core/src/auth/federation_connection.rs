@@ -15,4 +15,9 @@ pub struct FederationConnection {
     /// for an enterprise IdP whose users are pre-provisioned; left false for consumer
     /// providers (e.g. Google) to avoid takeover via an attacker-asserted email.
     pub auto_link_verified_email: bool,
+    /// Whether the IdP's `email_verified` claim must be true before the email is trusted.
+    /// True for consumer providers (Google sends it). False for an enterprise IdP that is
+    /// authoritative for its own users and may omit the claim entirely (e.g. Microsoft
+    /// Entra) — the org's IdP vouching for the user is the verification.
+    pub require_email_verified: bool,
 }

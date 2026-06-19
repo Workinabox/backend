@@ -23,6 +23,7 @@ async fn full_auth_code_flow_against_mock_oidc() {
         scopes: vec!["openid".to_owned(), "email".to_owned()],
         redirect_uri: "http://localhost/cb".to_owned(),
         auto_link_verified_email: false,
+        require_email_verified: true,
     };
     let relying_party = OidcRelyingParty::new(vec![connection]);
 
@@ -81,4 +82,67 @@ async fn full_auth_code_flow_against_mock_oidc() {
         .complete("mock", &code, &request.pkce_verifier, "wrong-nonce")
         .await;
     assert!(tampered.is_err(), "a wrong nonce must fail validation");
+}
+
+#[tokio::test]
+#[ignore = "requires mock-oauth2-server (set OIDC_MOCK_ISSUER or run on localhost:9090)"]
+async fn entra_shaped_token_uses_preferred_username_as_email() {
+    // Microsoft Entra commonly issues an ID token carrying the address in `preferred_username`
+    // (the UPN) and omits the `email`/`email_verified` claims. The adapter must surface that
+    // UPN as the email so the enterprise connection can match a pre-provisioned user.
+    let issuer = std::env::var("OIDC_MOCK_ISSUER")
+        .unwrap_or_else(|_| "http://localhost:9090/default".to_owned());
+    let connection = FederationConnection {
+        slug: "mock".to_owned(),
+        issuer: issuer.clone(),
+        client_id: "test-client".to_owned(),
+        client_secret: "test-secret".to_owned(),
+        scopes: vec!["openid".to_owned(), "email".to_owned()],
+        redirect_uri: "http://localhost/cb".to_owned(),
+        auto_link_verified_email: true,
+        require_email_verified: false,
+    };
+    let relying_party = OidcRelyingParty::new(vec![connection]);
+
+    let request = relying_party.begin("mock").await.expect("begin login");
+
+    let http = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = http
+        .post(&request.authorize_url)
+        .form(&[
+            ("username", "ada@corp.onmicrosoft.com"),
+            // No `email`/`email_verified` — only the UPN, as Entra sends.
+            (
+                "claims",
+                r#"{"preferred_username":"ada@corp.onmicrosoft.com","name":"Ada Lovelace"}"#,
+            ),
+        ])
+        .send()
+        .await
+        .expect("drive mock login");
+    let location = response
+        .headers()
+        .get("location")
+        .expect("redirect with code")
+        .to_str()
+        .unwrap();
+    let code = location
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    let claims = relying_party
+        .complete("mock", &code, &request.pkce_verifier, &request.nonce)
+        .await
+        .expect("complete login");
+
+    assert_eq!(claims.email.as_deref(), Some("ada@corp.onmicrosoft.com"));
+    assert!(!claims.email_verified, "Entra omits email_verified");
 }

@@ -15,6 +15,8 @@ openidconnect = { workspace = true }
 rand = { workspace = true }
 refinery = { workspace = true }
 reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 tracing = { workspace = true }
 

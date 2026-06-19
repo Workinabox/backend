@@ -132,7 +132,16 @@ impl OidcPort for OidcRelyingParty {
         Ok(VerifiedClaims {
             issuer: claims.issuer().to_string(),
             subject: claims.subject().to_string(),
-            email: claims.email().map(|email| email.as_str().to_owned()),
+            // Microsoft Entra typically sends the address as `preferred_username` (the
+            // UPN) and omits the `email` claim, so fall back to it.
+            email: claims
+                .email()
+                .map(|email| email.as_str().to_owned())
+                .or_else(|| {
+                    claims
+                        .preferred_username()
+                        .map(|upn| upn.as_str().to_owned())
+                }),
             email_verified: claims.email_verified().unwrap_or(false),
             name: claims
                 .name()

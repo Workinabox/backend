@@ -113,17 +113,23 @@ where
             return Ok((identity.principal().clone(), flow.return_to().to_owned()));
         }
 
-        // Provisioning/linking needs a verified email.
-        let email = match (&claims.email, claims.email_verified) {
-            (Some(email), true) => email.clone(),
-            _ => {
-                return Err(AuthError::FederationFailed(
-                    "the identity provider did not supply a verified email".to_owned(),
-                ));
-            }
-        };
-
         let connection_config = self.connection(connection)?;
+
+        // Provisioning or matching a user needs an email. Whether it must be marked
+        // verified is per-connection: a consumer IdP (Google) stamps `email_verified` and
+        // we require it; an enterprise IdP is authoritative for its own users and may omit
+        // the claim (e.g. Microsoft Entra), so we trust the email it sends.
+        let Some(email) = claims.email.clone() else {
+            return Err(AuthError::FederationFailed(
+                "the identity provider did not supply an email".to_owned(),
+            ));
+        };
+        if connection_config.require_email_verified && !claims.email_verified {
+            return Err(AuthError::FederationFailed(
+                "the identity provider did not supply a verified email".to_owned(),
+            ));
+        }
+
         let principal = match self.directory.find_by_email(&email).await? {
             Some(existing) => {
                 if connection_config.auto_link_verified_email {
@@ -272,6 +278,7 @@ mod tests {
                 scopes: vec!["openid".to_owned(), "email".to_owned()],
                 redirect_uri: "https://app/api/auth/oidc/google/callback".to_owned(),
                 auto_link_verified_email: false,
+                require_email_verified: true,
             },
             FederationConnection {
                 slug: "enterprise".to_owned(),
@@ -281,6 +288,7 @@ mod tests {
                 scopes: vec!["openid".to_owned(), "email".to_owned()],
                 redirect_uri: "https://app/api/auth/oidc/enterprise/callback".to_owned(),
                 auto_link_verified_email: true,
+                require_email_verified: false,
             },
         ]
     }
@@ -359,15 +367,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unverified_email_is_rejected() {
+    async fn google_rejects_an_unverified_email() {
+        // Google stamps email_verified; an unverified email from it is suspect.
         let svc = service(claims("ada@corp.com", false), FakeDirectory::default());
-        svc.begin_login("enterprise", "/works").await.unwrap();
+        svc.begin_login("google", "/works").await.unwrap();
         assert!(matches!(
-            svc.complete_login("enterprise", "st", "code")
+            svc.complete_login("google", "st", "code")
                 .await
                 .unwrap_err(),
             AuthError::FederationFailed(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn enterprise_accepts_an_unverified_email() {
+        // An enterprise IdP (e.g. Microsoft Entra) is authoritative for its users and may
+        // omit email_verified; the connection trusts the email and JIT-provisions.
+        let svc = service(claims("ada@corp.com", false), FakeDirectory::default());
+        svc.begin_login("enterprise", "/works").await.unwrap();
+        let (principal, _) = svc
+            .complete_login("enterprise", "st", "code")
+            .await
+            .unwrap();
+        assert_eq!(principal.as_str(), "U-1");
     }
 
     #[tokio::test]
