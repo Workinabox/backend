@@ -9,10 +9,17 @@
 
 use authbox_core::auth::{FederationConnection, OidcPort};
 use authbox_inf::OidcRelyingParty;
+use tokio::sync::Mutex;
+
+// Both tests drive the SAME mock-oauth2-server instance. Running their auth-code flows
+// concurrently crosses the per-code nonce/claims state on the mock (seen in CI as "missing
+// nonce" / wrong-email failures). Serialize them so each flow completes in isolation.
+static MOCK_FLOW: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
 #[ignore = "requires mock-oauth2-server (set OIDC_MOCK_ISSUER or run on localhost:9090)"]
 async fn full_auth_code_flow_against_mock_oidc() {
+    let _serial = MOCK_FLOW.lock().await;
     let issuer = std::env::var("OIDC_MOCK_ISSUER")
         .unwrap_or_else(|_| "http://localhost:9090/default".to_owned());
     let connection = FederationConnection {
@@ -87,6 +94,7 @@ async fn full_auth_code_flow_against_mock_oidc() {
 #[tokio::test]
 #[ignore = "requires mock-oauth2-server (set OIDC_MOCK_ISSUER or run on localhost:9090)"]
 async fn entra_shaped_token_uses_preferred_username_as_email() {
+    let _serial = MOCK_FLOW.lock().await;
     // Microsoft Entra commonly issues an ID token carrying the address in `preferred_username`
     // (the UPN) and omits the `email`/`email_verified` claims. The adapter must surface that
     // UPN as the email so the enterprise connection can match a pre-provisioned user.
