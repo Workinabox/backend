@@ -367,6 +367,7 @@ dependencies = [
  "rand 0.10.1",
  "refinery",
  "reqwest",
+ "serde_json",
  "tokio",
  "tokio-postgres",
  "tracing",

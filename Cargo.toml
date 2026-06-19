@@ -38,7 +38,7 @@ llama-cpp-2 = { version = "0.1.138", default-features = false }
 mediasoup = "0.20"
 openidconnect = { version = "4", default-features = false, features = ["reqwest"] }
 opus = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rand = "0.10"
 rcgen = "0.13"
 refinery = { version = "0.8", features = ["tokio-postgres"] }

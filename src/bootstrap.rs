@@ -11,8 +11,8 @@ use authbox_inf::{
     InMemoryAuthFlowStore, InMemoryCredentialStore, InMemoryFederatedIdentityStore,
     InMemorySessionStore, InMemoryVerificationTokenStore, LoggingEmailSender, OidcRelyingParty,
     PostgresAuthFlowStore, PostgresCredentialStore, PostgresFederatedIdentityStore,
-    PostgresSessionStore, PostgresVerificationTokenStore, RandomSecretGenerator, SessionStoreImpl,
-    SmtpEmailSender, VerificationTokenStoreImpl,
+    PostgresSessionStore, PostgresVerificationTokenStore, RandomSecretGenerator, ResendEmailSender,
+    SessionStoreImpl, SmtpEmailSender, VerificationTokenStoreImpl,
 };
 use tokio::sync::mpsc;
 use tracing::info;
@@ -246,6 +246,15 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         .await;
     }
 
+    // Pre-provision a dev SSO user (env-gated, idempotent) so a real Entra/OIDC login lands
+    // on an existing Owner account rather than a role-less JIT one.
+    seed_sso_owner(
+        user_service.as_ref(),
+        access_service.as_ref(),
+        auth_service.as_ref(),
+    )
+    .await?;
+
     let pipeline_repo = match &pool {
         Some(pool) => PipelineRepo::Postgres(PostgresPipelineRepository::new(pool.clone())),
         None => PipelineRepo::InMemory(InMemoryPipelineRepository::new()),
@@ -302,6 +311,8 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
             ],
             redirect_uri: format!("{}/api/auth/oidc/google/callback", auth_settings.base_url),
             auto_link_verified_email: false,
+            // Google reliably stamps email_verified; require it.
+            require_email_verified: true,
         });
     }
     if auth_settings.oidc_enabled {
@@ -320,6 +331,9 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
                 auth_settings.base_url
             ),
             auto_link_verified_email: true,
+            // An enterprise IdP is authoritative for its users and may omit
+            // email_verified (e.g. Microsoft Entra) — don't require the claim.
+            require_email_verified: false,
         });
     }
     let federation_service = if connections.is_empty() {
@@ -347,42 +361,61 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         )))
     };
 
-    // Forgotten-password reset: emails a single-use link. Uses SMTP when configured,
-    // otherwise logs the email so the link still shows up in the server log for dev.
-    let email_sender: Arc<dyn EmailSender> = match std::env::var("WIAB_SMTP_HOST") {
-        Ok(host) if !host.trim().is_empty() => {
-            let port = std::env::var("WIAB_SMTP_PORT")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(587);
-            let username = std::env::var("WIAB_SMTP_USER")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let password = std::env::var("WIAB_SMTP_PASSWORD")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let from = std::env::var("WIAB_SMTP_FROM")
-                .unwrap_or_else(|_| "no-reply@workinabox.local".to_owned());
-            match SmtpEmailSender::new(
-                &host,
-                port,
-                username,
-                password,
-                &from,
-                env_flag("WIAB_SMTP_TLS"),
-            ) {
-                Ok(sender) => {
-                    info!("email delivery: SMTP {host}:{port}");
-                    Arc::new(sender)
-                }
-                Err(error) => {
-                    info!("email delivery: SMTP config invalid ({error}); logging instead");
-                    Arc::new(LoggingEmailSender)
+    // Transactional email (reset/invite/verify). Provider is selectable via
+    // WIAB_EMAIL_PROVIDER (default "resend"); "smtp" uses lettre. Missing credentials fall
+    // back to logging so dev still surfaces the link in the server log.
+    let from = std::env::var("WIAB_EMAIL_FROM")
+        .or_else(|_| std::env::var("WIAB_SMTP_FROM"))
+        .unwrap_or_else(|_| "no-reply@workinabox.local".to_owned());
+    let provider = std::env::var("WIAB_EMAIL_PROVIDER").unwrap_or_else(|_| "resend".to_owned());
+    let email_sender: Arc<dyn EmailSender> = match provider.trim().to_ascii_lowercase().as_str() {
+        "resend" => match std::env::var("RESEND_API_KEY") {
+            Ok(key) if !key.trim().is_empty() => {
+                info!("email delivery: Resend (from {from})");
+                Arc::new(ResendEmailSender::new(key, from))
+            }
+            _ => {
+                info!("email delivery: logging only (set RESEND_API_KEY to send via Resend)");
+                Arc::new(LoggingEmailSender)
+            }
+        },
+        "smtp" => match std::env::var("WIAB_SMTP_HOST") {
+            Ok(host) if !host.trim().is_empty() => {
+                let port = std::env::var("WIAB_SMTP_PORT")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(587);
+                let username = std::env::var("WIAB_SMTP_USER")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                let password = std::env::var("WIAB_SMTP_PASSWORD")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                match SmtpEmailSender::new(
+                    &host,
+                    port,
+                    username,
+                    password,
+                    &from,
+                    env_flag("WIAB_SMTP_TLS"),
+                ) {
+                    Ok(sender) => {
+                        info!("email delivery: SMTP {host}:{port}");
+                        Arc::new(sender)
+                    }
+                    Err(error) => {
+                        info!("email delivery: SMTP config invalid ({error}); logging instead");
+                        Arc::new(LoggingEmailSender)
+                    }
                 }
             }
-        }
-        _ => {
-            info!("email delivery: logging only (set WIAB_SMTP_HOST to send real email)");
+            _ => {
+                info!("email delivery: logging only (set WIAB_SMTP_HOST to send via SMTP)");
+                Arc::new(LoggingEmailSender)
+            }
+        },
+        other => {
+            info!("email delivery: unknown WIAB_EMAIL_PROVIDER '{other}', logging only");
             Arc::new(LoggingEmailSender)
         }
     };
@@ -550,6 +583,56 @@ async fn seed_owner(
         "seeded owner '{}' (Owner of O-1) — login: owner@workinabox.local / {} — bootstrap access token: {}",
         owner.id, dev_password, issued.plaintext
     );
+}
+
+/// Pre-provisions a dev SSO user (Active + Owner of O-1) from env, so a real Entra/OIDC
+/// login matches an existing account instead of landing role-less. Idempotent; a no-op
+/// unless `WIAB_DEV_SSO_OWNER_EMAIL` is set. Dev-only convenience.
+async fn seed_sso_owner(
+    user_service: &UserApplicationService<UserRepo>,
+    access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
+    auth_service: &WiabAuthService,
+) -> anyhow::Result<()> {
+    let email = std::env::var("WIAB_DEV_SSO_OWNER_EMAIL").unwrap_or_default();
+    if email.is_empty() {
+        return Ok(());
+    }
+    if user_service.find_by_email(&email).await?.is_some() {
+        info!("dev SSO owner '{email}' already present — leaving as-is");
+        return Ok(());
+    }
+    let name = std::env::var("WIAB_DEV_SSO_OWNER_NAME").unwrap_or_else(|_| email.clone());
+    let user = user_service
+        .create_user(CreateUserRequest {
+            kind: "human".to_owned(),
+            name,
+            email: Some(email.clone()),
+        })
+        .await
+        .context("failed to seed dev SSO owner")?;
+    let user_id: UserId = user.id.parse().expect("seeded SSO owner id is valid");
+    access_service
+        .grant_direct(
+            user_id,
+            Scope::Org(OrganizationId::from_number(1)),
+            Role::Owner,
+        )
+        .await
+        .context("failed to grant dev SSO owner role")?;
+    // Optional local-password fallback for first run if SSO misbehaves.
+    if let Ok(password) = std::env::var("WIAB_DEV_SSO_OWNER_PASSWORD")
+        && !password.is_empty()
+    {
+        auth_service
+            .set_password(PrincipalId::new(user.id.clone()), &password)
+            .await
+            .context("failed to set dev SSO owner password")?;
+    }
+    info!(
+        "seeded dev SSO owner '{}' ({email}) as Owner of O-1",
+        user.id
+    );
+    Ok(())
 }
 
 async fn log_loaded_meetings(

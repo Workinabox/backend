@@ -158,6 +158,12 @@ where
         }))
     }
 
+    /// Double-submit CSRF check: true when the presented token hashes to the session's stored
+    /// CSRF hash. Empty tokens never match.
+    pub fn csrf_matches(&self, session: &ResolvedSession, presented: &str) -> bool {
+        !presented.is_empty() && self.token_hasher.hash(presented) == session.csrf_hash
+    }
+
     /// Revoke the session a cookie secret resolves to. Idempotent.
     pub async fn logout(&self, cookie_secret: &str) -> Result<(), AuthError> {
         let token_hash = self.token_hasher.hash(cookie_secret);
@@ -386,6 +392,28 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn csrf_matches_only_the_session_token() {
+        let service = service();
+        service
+            .set_password(PrincipalId::new("U-1"), "correct horse")
+            .await
+            .unwrap();
+        let established = service
+            .login_with_password("ada@example.com", "correct horse")
+            .await
+            .unwrap();
+        let resolved = service
+            .resolve_session(&established.cookie_secret)
+            .await
+            .unwrap()
+            .expect("session resolves");
+
+        assert!(service.csrf_matches(&resolved, &established.csrf_token));
+        assert!(!service.csrf_matches(&resolved, "not-the-token"));
+        assert!(!service.csrf_matches(&resolved, ""));
     }
 
     #[tokio::test]
