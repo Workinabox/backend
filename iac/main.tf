@@ -16,6 +16,15 @@ locals {
   dns_csv         = join(", ", var.dns_servers)
   mem_bytes       = var.memory_gb * 1024 * 1024 * 1024
 
+  # Per-role model env lines (role LLAMA -> WIAB_LLAMA_ENABLED / WIAB_LLAMA_MODEL_FILE),
+  # written verbatim into provision.env on first boot and refreshed on each in-place deploy.
+  model_env_lines = flatten([
+    for role, m in var.models : [
+      "WIAB_${role}_ENABLED=${m.enabled}",
+      "WIAB_${role}_MODEL_FILE=${m.file}",
+    ]
+  ])
+
   cloud_config = templatefile("${path.module}/templates/cloud-init.yaml.tftpl", {
     hostname           = var.hostname
     fqdn               = var.domain
@@ -32,6 +41,9 @@ locals {
     fc_kernel_url      = var.fc_test_kernel_url
     fc_rootfs_url      = var.fc_test_rootfs_url
     db_password        = var.db_password
+    wiab_data_dir      = var.wiab_data_dir
+    wiab_models_url    = var.wiab_models_url
+    model_env_lines    = local.model_env_lines
   })
 
   network_config = templatefile("${path.module}/templates/network-config.yaml.tftpl", {
@@ -181,10 +193,11 @@ resource "null_resource" "reconfigure_proxy" {
   }
 }
 
-# Deploys the pinned backend/frontend versions over SSH. Re-runs whenever a
-# version variable changes (bump backend_version / frontend_version and apply)
-# WITHOUT recreating the VM. On first apply it waits for cloud-init to finish,
-# then no-ops because wiab-deploy is idempotent (the version is already deployed).
+# Deploys the pinned backend/frontend versions AND reconciles the model set over SSH.
+# Re-runs whenever a version variable, the `models` map, or the models URL/data dir changes
+# (bump/edit and apply) WITHOUT recreating the VM. On first apply it waits for cloud-init to
+# finish, then no-ops because wiab-deploy is idempotent (versions + model fingerprint already
+# current). The model env is refreshed in provision.env here so wiab-deploy fetches the new set.
 resource "null_resource" "deploy_app" {
   depends_on = [
     null_resource.enable_nested_virt,
@@ -195,6 +208,9 @@ resource "null_resource" "deploy_app" {
   triggers = {
     backend_version  = var.backend_version
     frontend_version = var.frontend_version
+    models           = jsonencode(var.models)
+    models_url       = var.wiab_models_url
+    data_dir         = var.wiab_data_dir
   }
 
   connection {
@@ -205,9 +221,21 @@ resource "null_resource" "deploy_app" {
   }
 
   provisioner "remote-exec" {
-    inline = [
-      "cloud-init status --wait || true",
-      "sudo wiab-deploy --backend ${var.backend_version} --frontend ${var.frontend_version}",
-    ]
+    inline = concat(
+      [
+        "set -eu",
+        "cloud-init status --wait || true",
+        # Refresh model config in provision.env (idempotent: drop old model lines, append
+        # current). The role-flag regex only matches single-token model roles (WIAB_LLAMA_*,
+        # WIAB_WHISPER_*), not the multi-token auth flags which live in wiab.env/oidc.env.
+        "sudo sed -i '/^WIAB_DATA_DIR=/d;/^WIAB_MODELS_URL=/d;/^WIAB_[A-Z0-9]*_ENABLED=/d;/^WIAB_[A-Z0-9]*_MODEL_FILE=/d' /etc/wiab/provision.env",
+        "echo 'WIAB_DATA_DIR=${var.wiab_data_dir}' | sudo tee -a /etc/wiab/provision.env >/dev/null",
+        "echo 'WIAB_MODELS_URL=${var.wiab_models_url}' | sudo tee -a /etc/wiab/provision.env >/dev/null",
+      ],
+      [for line in local.model_env_lines : "echo '${line}' | sudo tee -a /etc/wiab/provision.env >/dev/null"],
+      [
+        "sudo wiab-deploy --backend ${var.backend_version} --frontend ${var.frontend_version}",
+      ],
+    )
   }
 }

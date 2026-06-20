@@ -45,3 +45,16 @@ ssh_private_key_path = "~/.ssh/id_rsa"
 # to re-run the provisioning. db_password is the local 'wiab' role password (localhost-only).
 db_provision_version = "v1"
 db_password          = "wiab"
+
+# --- Local models (Llama LLM, Whisper STT) ---
+# Files live in Azure blob storage and are fetched via azcopy by wiab-deploy into
+# ${wiab_data_dir}/models — on first boot and on every in-place deploy. wiab_models_url is
+# the container URL WITH a SAS token. Edit the `models` map (add/remove an entry, change a
+# filename, flip enabled) and `terraform apply` re-fetches. Filenames are immutable: new
+# weights ⇒ new filename. Leave `models = {}` (and url empty) to skip models entirely.
+wiab_data_dir   = "/var/lib/wiab"
+wiab_models_url = "https://gosandcostore.blob.core.windows.net/workinabox?sv=...&sig=..."
+models = {
+  LLAMA   = { enabled = true, file = "gemma-3-1b-it-Q4_K_M.gguf" }
+  WHISPER = { enabled = true, file = "ggml-base.en.bin" }
+}

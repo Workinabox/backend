@@ -161,6 +161,44 @@ variable "db_password" {
 }
 
 # ---------------------------------------------------------------------------
+# Local models (Llama LLM, Whisper STT). Files live in Azure blob storage and are
+# fetched via azcopy into ${wiab_data_dir}/models by wiab-deploy — on first boot and
+# on every in-place deploy. The backend only reads them. Changing the `models` map
+# (add/remove an entry, change a filename, flip enabled) re-fetches on the next apply.
+# Filenames are treated as IMMUTABLE: new weights ⇒ new filename (never overwrite a blob).
+# ---------------------------------------------------------------------------
+variable "wiab_data_dir" {
+  type        = string
+  description = "On-disk data directory holding model files under <dir>/models."
+  default     = "/var/lib/wiab"
+}
+
+variable "wiab_models_url" {
+  type        = string
+  description = "Azure blob container URL WITH an embedded SAS token query string, e.g. https://<acct>.blob.core.windows.net/<container>?<SAS>. Read only by the deploy/fetch step, never by the app. Empty disables model fetching."
+  default     = ""
+  sensitive   = true
+}
+
+variable "models" {
+  type = map(object({
+    enabled = bool
+    file    = string
+  }))
+  default     = {}
+  description = <<-EOT
+    Local models keyed by UPPERCASE role. Each key maps to the env vars the backend reads:
+    role LLAMA -> WIAB_LLAMA_ENABLED + WIAB_LLAMA_MODEL_FILE. `file` is the immutable filename
+    in the Azure container (and under <wiab_data_dir>/models). `enabled` toggles the model
+    without removing its entry. Example:
+      models = {
+        LLAMA   = { enabled = true, file = "gemma-3-1b-it-Q4_K_M.gguf" }
+        WHISPER = { enabled = true, file = "ggml-base.en.bin" }
+      }
+  EOT
+}
+
+# ---------------------------------------------------------------------------
 # Firecracker smoke-test artifacts (bump as upstream rotates them)
 # ---------------------------------------------------------------------------
 variable "fc_test_kernel_url" {

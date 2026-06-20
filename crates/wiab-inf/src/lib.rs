@@ -27,6 +27,7 @@ pub mod in_memory_work_numbering;
 pub mod in_memory_work_repository;
 pub mod llama_meeting_intelligence;
 pub mod llama_runtime;
+pub mod model_paths;
 pub mod pg_pool;
 pub mod postgres_agent_repository;
 pub mod postgres_board_repository;

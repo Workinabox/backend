@@ -1,5 +1,4 @@
 use std::{
-    path::Path,
     sync::{
         Arc,
         mpsc::{self, Receiver, Sender},
@@ -8,10 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use opus::{Channels as OpusChannels, Decoder as OpusDecoder};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 use wiab_core::{
     audio::{
@@ -21,6 +20,8 @@ use wiab_core::{
     },
     transcript::{FinalizedTranscript, TranscriptIdentity, TranscriptJob},
 };
+
+use crate::model_paths::{env_flag, required_env, resolve_model_file};
 
 const INGEST_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -33,18 +34,15 @@ impl LocalTranscriber {
     pub fn from_env(
         transcript_tx: UnboundedSender<FinalizedTranscript>,
     ) -> anyhow::Result<Option<Arc<Self>>> {
-        let Some(model_path) = std::env::var("WIAB_WHISPER_MODEL_PATH").ok() else {
-            info!("transcription disabled: set WIAB_WHISPER_MODEL_PATH to enable local STT");
-            return Ok(None);
-        };
-
-        if !Path::new(&model_path).exists() {
-            warn!(
-                "transcription disabled: model path '{}' was not found",
-                model_path
-            );
+        if !env_flag("WIAB_WHISPER_ENABLED") {
+            info!("transcription disabled: WIAB_WHISPER_ENABLED is off");
             return Ok(None);
         }
+
+        let model_file = required_env("WIAB_WHISPER_MODEL_FILE")?;
+        let model_path = resolve_model_file(&model_file)?
+            .to_string_lossy()
+            .into_owned();
 
         let language = std::env::var("WIAB_STT_LANGUAGE").ok();
         let threads = std::env::var("WIAB_STT_THREADS")
@@ -54,12 +52,26 @@ impl LocalTranscriber {
             .unwrap_or(4);
 
         let (tx, rx) = mpsc::channel::<TranscriptJob>();
+        let (startup_tx, startup_rx) = mpsc::channel();
         thread::Builder::new()
             .name("wiab-stt".to_owned())
             .spawn(move || {
-                run_transcription_worker(model_path, language, threads, rx, transcript_tx)
+                run_transcription_worker(
+                    model_path,
+                    language,
+                    threads,
+                    rx,
+                    transcript_tx,
+                    startup_tx,
+                )
             })
             .context("failed to spawn transcription worker thread")?;
+
+        // Block until the worker reports the model loaded, so an enabled-but-broken model
+        // hard-fails startup just like llama (mirrors LlamaRuntime::new).
+        startup_rx
+            .recv()
+            .context("transcription worker thread exited before initialization completed")??;
 
         info!("transcription enabled with local whisper model");
         Ok(Some(Arc::new(Self { tx })))
@@ -78,18 +90,20 @@ fn run_transcription_worker(
     threads: i32,
     rx: Receiver<TranscriptJob>,
     transcript_tx: UnboundedSender<FinalizedTranscript>,
+    startup_tx: Sender<anyhow::Result<()>>,
 ) {
     let context_parameters = WhisperContextParameters::default();
     let context = match WhisperContext::new_with_params(&model_path, context_parameters) {
         Ok(context) => context,
         Err(err) => {
-            error!(
+            let _ = startup_tx.send(Err(anyhow!(
                 "failed to load whisper model '{}' for transcription: {err}",
                 model_path
-            );
+            )));
             return;
         }
     };
+    let _ = startup_tx.send(Ok(()));
 
     info!(
         "transcription worker ready (language={}, threads={})",
