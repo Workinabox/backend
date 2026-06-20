@@ -38,19 +38,18 @@ use wiab_core::{
 };
 use wiab_inf::{
     AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, Git2Backend,
-    HeuristicMeetingIntelligence, InMemoryAgentNumbering, InMemoryAgentRepository,
-    InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
-    InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
-    InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
-    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
-    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
-    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo,
-    PipelineRepo, PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
-    PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
-    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresWorkRepository, ProjectRepo,
-    RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
-    Sha256TokenHasher, SystemClock, UserRepo, WiabAuthService, WiabUserDirectory, WorkRepo,
-    pg_pool,
+    InMemoryAgentNumbering, InMemoryAgentRepository, InMemoryBoardNumbering,
+    InMemoryBoardRepository, InMemoryMeetingRepository, InMemoryOrganizationNumbering,
+    InMemoryOrganizationRepository, InMemoryPipelineNumbering, InMemoryPipelineRepository,
+    InMemoryProjectNumbering, InMemoryProjectRepository, InMemoryRepoNumbering,
+    InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
+    InMemoryUserNumbering, InMemoryUserRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
+    LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
+    PostgresProjectRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
+    PostgresUserRepository, PostgresWorkRepository, ProjectRepo, RandomTokenFactory, RepoRepo,
+    RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo,
+    WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::Result<AppState> {
@@ -659,25 +658,14 @@ fn spawn_transcript_runtime(
     });
 }
 
-fn load_meeting_intelligence() -> anyhow::Result<Arc<dyn MeetingIntelligence>> {
-    match std::env::var("WIAB_MEETING_INTELLIGENCE")
-        .unwrap_or_else(|_| "heuristic".to_owned())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "heuristic" => {
-            info!("meeting intelligence adapter: heuristic");
-            Ok(Arc::new(HeuristicMeetingIntelligence))
-        }
-        "llama" => {
-            let intelligence = LlamaMeetingIntelligence::from_env()
-                .context("failed to initialize llama meeting intelligence")?;
-            info!("meeting intelligence adapter: llama");
-            Ok(Arc::new(intelligence))
-        }
-        other => Err(anyhow::anyhow!(
-            "unsupported WIAB_MEETING_INTELLIGENCE value '{other}'"
-        )),
+fn load_meeting_intelligence() -> anyhow::Result<Option<Arc<dyn MeetingIntelligence>>> {
+    if !env_flag("WIAB_LLAMA_ENABLED") {
+        info!("meeting intelligence disabled (WIAB_LLAMA_ENABLED off)");
+        return Ok(None);
     }
+
+    let intelligence = LlamaMeetingIntelligence::from_env()
+        .context("failed to initialize llama meeting intelligence")?;
+    info!("meeting intelligence adapter: llama (eager-loaded)");
+    Ok(Some(Arc::new(intelligence)))
 }

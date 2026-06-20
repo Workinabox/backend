@@ -8,8 +8,8 @@ use wiab_core::{
 };
 
 use crate::{
-    heuristic_meeting_intelligence::HeuristicMeetingIntelligence,
     llama_runtime::{LlamaRuntime, LlamaRuntimeConfig, LlamaRuntimeMessage},
+    model_paths::{required_env, resolve_model_file},
 };
 
 const DEFAULT_CONTEXT_TOKENS: u32 = 4096;
@@ -17,7 +17,6 @@ const DEFAULT_MAX_REPLY_TOKENS: usize = 128;
 const DEFAULT_MAX_MINUTES_TOKENS: usize = 512;
 
 pub struct LlamaMeetingIntelligence {
-    floor_control: HeuristicMeetingIntelligence,
     runtime: LlamaRuntime,
     max_reply_tokens: usize,
     max_minutes_tokens: usize,
@@ -36,7 +35,8 @@ struct GeneratedMinutesAgendaItem {
 
 impl LlamaMeetingIntelligence {
     pub fn from_env() -> anyhow::Result<Self> {
-        let model_path = required_env("WIAB_LLAMA_MODEL_PATH")?;
+        let model_file = required_env("WIAB_LLAMA_MODEL_FILE")?;
+        let model_path = resolve_model_file(&model_file)?;
         let context_tokens =
             optional_env_parse("WIAB_LLAMA_CONTEXT_TOKENS")?.unwrap_or(DEFAULT_CONTEXT_TOKENS);
         let max_reply_tokens =
@@ -64,7 +64,7 @@ impl LlamaMeetingIntelligence {
         }
 
         let runtime = LlamaRuntime::new(LlamaRuntimeConfig {
-            model_path: model_path.into(),
+            model_path,
             context_tokens,
             threads,
             n_gpu_layers,
@@ -72,7 +72,6 @@ impl LlamaMeetingIntelligence {
         })?;
 
         Ok(Self {
-            floor_control: HeuristicMeetingIntelligence,
             runtime,
             max_reply_tokens,
             max_minutes_tokens,
@@ -83,22 +82,20 @@ impl LlamaMeetingIntelligence {
 impl MeetingIntelligence for LlamaMeetingIntelligence {
     fn evaluate_floor_requests(
         &self,
-        meeting: &Meeting,
-        utterance_text: &str,
-        source_utterance_id: &str,
+        _meeting: &Meeting,
+        _utterance_text: &str,
+        _source_utterance_id: &str,
     ) -> Vec<FloorRequestCandidate> {
-        self.floor_control
-            .evaluate_floor_requests(meeting, utterance_text, source_utterance_id)
+        Vec::new()
     }
 
     fn select_floor_request(
         &self,
-        meeting: &Meeting,
-        utterance_text: &str,
-        floor_requests: &[FloorRequestCandidate],
+        _meeting: &Meeting,
+        _utterance_text: &str,
+        _floor_requests: &[FloorRequestCandidate],
     ) -> Option<String> {
-        self.floor_control
-            .select_floor_request(meeting, utterance_text, floor_requests)
+        None
     }
 
     fn generate_agent_reply(
@@ -355,15 +352,6 @@ fn normalize_phrase(phrase: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
-}
-
-fn required_env(key: &str) -> anyhow::Result<String> {
-    let value = std::env::var(key).with_context(|| format!("missing required env var {key}"))?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        bail!("env var {key} must not be empty");
-    }
-    Ok(trimmed.to_owned())
 }
 
 fn optional_env_parse<T>(key: &str) -> anyhow::Result<Option<T>>

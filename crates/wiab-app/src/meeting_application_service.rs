@@ -27,7 +27,7 @@ const MODERATOR_VOICE_ID: &str = "alloy";
 pub struct MeetingApplicationService<R: MeetingRepository> {
     meeting_repository: R,
     mutation_guard: Arc<Mutex<()>>,
-    intelligence: Arc<dyn MeetingIntelligence>,
+    intelligence: Option<Arc<dyn MeetingIntelligence>>,
     speech: Arc<dyn SpeechSynthesizer>,
     clock: Arc<dyn Clock>,
 }
@@ -35,7 +35,7 @@ pub struct MeetingApplicationService<R: MeetingRepository> {
 impl<R: MeetingRepository> MeetingApplicationService<R> {
     pub fn new(
         meeting_repository: R,
-        intelligence: Arc<dyn MeetingIntelligence>,
+        intelligence: Option<Arc<dyn MeetingIntelligence>>,
         speech: Arc<dyn SpeechSynthesizer>,
         clock: Arc<dyn Clock>,
     ) -> Self {
@@ -267,7 +267,11 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         agent: MeetingParticipant,
         text: String,
     ) -> Result<String, MeetingIntelligenceError> {
-        let intelligence = self.intelligence.clone();
+        let Some(intelligence) = self.intelligence.clone() else {
+            return Err(MeetingIntelligenceError::Message(
+                "meeting intelligence disabled".to_owned(),
+            ));
+        };
         task::spawn_blocking(move || intelligence.generate_agent_reply(&meeting, &agent, &text))
             .await
             .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
@@ -277,7 +281,11 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         &self,
         meeting: Meeting,
     ) -> Result<wiab_core::meeting::MinutesDocument, MeetingIntelligenceError> {
-        let intelligence = self.intelligence.clone();
+        let Some(intelligence) = self.intelligence.clone() else {
+            return Err(MeetingIntelligenceError::Message(
+                "meeting intelligence disabled".to_owned(),
+            ));
+        };
         task::spawn_blocking(move || intelligence.generate_minutes(&meeting))
             .await
             .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
@@ -590,7 +598,7 @@ mod tests {
         let repository = TestMeetingRepository::default();
         let service = MeetingApplicationService::new(
             repository.clone(),
-            Arc::new(TestIntelligence),
+            Some(Arc::new(TestIntelligence)),
             Arc::new(TestSpeechSynthesizer),
             Arc::new(TestClock),
         );
@@ -631,7 +639,7 @@ mod tests {
         let repository = TestMeetingRepository::default();
         let service = MeetingApplicationService::new(
             repository,
-            Arc::new(TestIntelligence),
+            Some(Arc::new(TestIntelligence)),
             Arc::new(TestSpeechSynthesizer),
             Arc::new(TestClock),
         );
@@ -665,7 +673,7 @@ mod tests {
         let repository = TestMeetingRepository::default();
         let service = MeetingApplicationService::new(
             repository.clone(),
-            Arc::new(TestIntelligence),
+            Some(Arc::new(TestIntelligence)),
             Arc::new(TestSpeechSynthesizer),
             Arc::new(TestClock),
         );
@@ -704,7 +712,7 @@ mod tests {
         let repository = TestMeetingRepository::default();
         let service = MeetingApplicationService::new(
             repository,
-            Arc::new(TestIntelligence),
+            Some(Arc::new(TestIntelligence)),
             Arc::new(TestSpeechSynthesizer),
             Arc::new(TestClock),
         );
@@ -755,7 +763,7 @@ mod tests {
         let repository = TestMeetingRepository::default();
         let service = MeetingApplicationService::new(
             repository,
-            Arc::new(TestIntelligence),
+            Some(Arc::new(TestIntelligence)),
             Arc::new(FailingSpeechSynthesizer),
             Arc::new(TestClock),
         );
@@ -793,6 +801,62 @@ mod tests {
             !events
                 .iter()
                 .any(|event| matches!(event, MeetingClientEvent::AgentSpeech { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_intelligence_yields_no_agent_reply_or_minutes() {
+        let repository = TestMeetingRepository::default();
+        let service = MeetingApplicationService::new(
+            repository,
+            None,
+            Arc::new(TestSpeechSynthesizer),
+            Arc::new(TestClock),
+        );
+        let meeting = service
+            .create_meeting(CreateMeetingRequest {
+                title: "Test".to_owned(),
+                owner: CreateMeetingParticipant::Human {
+                    name: "Frederic".to_owned(),
+                },
+                invited_participants: vec![CreateMeetingParticipant::Agent {
+                    name: "CTO".to_owned(),
+                    instructions: "You are the CTO".to_owned(),
+                    voice_id: "alloy".to_owned(),
+                }],
+                agenda: vec!["review launch timeline".to_owned()],
+            })
+            .await
+            .expect("meeting should be created");
+
+        let owner_id = meeting.owner_participant_id.clone();
+        let events = service
+            .record_human_utterance(
+                &meeting.meeting_id,
+                &owner_id,
+                "CTO, what is the biggest risk here?",
+            )
+            .await
+            .expect("transcript should be recorded");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, MeetingClientEvent::AgentText { .. }))
+        );
+
+        let end_events = service
+            .end_meeting(&meeting.meeting_id, &owner_id)
+            .await
+            .expect("owner should end meeting");
+        assert!(
+            end_events
+                .iter()
+                .any(|event| matches!(event, MeetingClientEvent::MeetingEnded { .. }))
+        );
+        assert!(
+            !end_events
+                .iter()
+                .any(|event| matches!(event, MeetingClientEvent::MinutesReady { .. }))
         );
     }
 }

@@ -99,6 +99,8 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='wiab'" | gr
 # 5. Backend env + systemd service (binary installed by wiab-deploy below)
 # ---------------------------------------------------------------------------
 mkdir -p /etc/wiab
+# Model env vars (WIAB_DATA_DIR + per-role WIAB_<ROLE>_ENABLED/_MODEL_FILE) are synced into
+# wiab.env by wiab-deploy, which also fetches the model files. Keep them out of here.
 cat > /etc/wiab/wiab.env <<EOF
 WIAB_MEDIASOUP_LISTEN_IP=0.0.0.0
 WIAB_MEDIASOUP_ANNOUNCED_ADDRESS=${WIAB_ANNOUNCED_ADDRESS}
@@ -178,8 +180,9 @@ nginx -t
 systemctl reload nginx
 
 # ---------------------------------------------------------------------------
-# 7. Deploy backend + frontend at the pinned versions (installs binary/libs,
-#    starts wiab, populates /var/www/wiab). Same script used for later updates.
+# 7. Deploy backend + frontend at the pinned versions and fetch the model set
+#    (installs binary/libs, syncs model env into wiab.env, azcopy-fetches enabled
+#    models, starts wiab, populates /var/www/wiab). Same script used for later updates.
 # ---------------------------------------------------------------------------
 wiab-deploy --backend "${WIAB_BACKEND_VERSION}" --frontend "${WIAB_FRONTEND_VERSION}"
 
