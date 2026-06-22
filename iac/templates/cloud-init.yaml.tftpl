@@ -27,7 +27,7 @@ write_files:
       WIAB_FC_ROOTFS_URL=${fc_rootfs_url}
       WIAB_DB_PASSWORD=${db_password}
       WIAB_DATA_DIR=${wiab_data_dir}
-      WIAB_MODELS_URL=${wiab_models_url}
+      WIAB_MODELS_URL='${wiab_models_url}'
 %{ for line in model_env_lines ~}
       ${line}
 %{ endfor ~}

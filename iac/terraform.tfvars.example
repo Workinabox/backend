@@ -41,8 +41,10 @@ frontend_version = "latest"
 ssh_private_key_path = "~/.ssh/id_rsa"
 
 # --- Persistence (local PostgreSQL on the VM) ---
-# Postgres is installed/configured over SSH (no VM rebuild). Bump db_provision_version
-# to re-run the provisioning. db_password is the local 'wiab' role password (localhost-only).
+# Postgres is installed/configured by cloud-init (provision.sh) on a fresh VM; on an
+# already-running VM it's (re)applied over SSH (null_resource.provision_db) — bump
+# db_provision_version to re-run without a rebuild. db_password is the local 'wiab'
+# role password (localhost-only).
 db_provision_version = "v1"
 db_password          = "wiab"
 
@@ -58,3 +60,15 @@ models = {
   LLAMA   = { enabled = true, file = "gemma-3-1b-it-Q4_K_M.gguf" }
   WHISPER = { enabled = true, file = "ggml-base.en.bin" }
 }
+
+# --- Identity / auth / email (written to wiab.env over SSH; in-place updatable) ---
+# Google/OIDC enable automatically once their credentials are non-empty. Register the
+# redirect URI https://<domain>/api/auth/oidc/<google|enterprise>/callback with the IdP.
+auth_local_signup = true
+email_from        = "no-reply@example.com" # must be a domain verified in Resend
+resend_api_key    = ""                     # Resend API key; empty = log link only, no send
+google_client_id     = ""
+google_client_secret = ""
+oidc_issuer          = "" # e.g. https://login.microsoftonline.com/<tenant>/v2.0
+oidc_client_id       = ""
+oidc_client_secret   = ""

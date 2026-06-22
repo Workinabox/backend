@@ -16,6 +16,10 @@ locals {
   dns_csv         = join(", ", var.dns_servers)
   mem_bytes       = var.memory_gb * 1024 * 1024 * 1024
 
+  # Federation turns on only when its credentials are fully provided.
+  google_enabled = var.google_client_id != "" && var.google_client_secret != ""
+  oidc_enabled   = var.oidc_issuer != "" && var.oidc_client_id != "" && var.oidc_client_secret != ""
+
   # Per-role model env lines (role LLAMA -> WIAB_LLAMA_ENABLED / WIAB_LLAMA_MODEL_FILE),
   # written verbatim into provision.env on first boot and refreshed on each in-place deploy.
   model_env_lines = flatten([
@@ -193,6 +197,71 @@ resource "null_resource" "reconfigure_proxy" {
   }
 }
 
+# Writes the identity/email/git runtime config into /etc/wiab/wiab.env (the systemd
+# EnvironmentFile — read literally, NOT shell-sourced) over SSH and restarts wiab.
+# In-place updatable: edit any of these variables and apply (no VM rebuild). Google/OIDC
+# enable automatically when their credentials are set. Also provisions a durable git root
+# (off /tmp) and a persistent git SSH host key so repos and the SSH identity survive reboots.
+resource "null_resource" "configure_app" {
+  depends_on = [null_resource.provision_db]
+
+  triggers = {
+    base_url             = "https://${var.domain}"
+    auth_local_signup    = var.auth_local_signup
+    email_from           = var.email_from
+    resend_api_key       = var.resend_api_key
+    google_enabled       = local.google_enabled
+    google_client_id     = var.google_client_id
+    google_client_secret = var.google_client_secret
+    oidc_enabled         = local.oidc_enabled
+    oidc_issuer          = var.oidc_issuer
+    oidc_client_id       = var.oidc_client_id
+    oidc_client_secret   = var.oidc_client_secret
+    git_root             = var.git_root
+  }
+
+  connection {
+    host        = var.host_ip
+    user        = "ubuntu"
+    private_key = file(pathexpand(var.ssh_private_key_path))
+    timeout     = "10m"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "set -eu",
+      "cloud-init status --wait || true",
+      # Durable git root (off /tmp) owned by the wiab service user; the backend create_dir_all's
+      # the leaf itself, this just guarantees the parent exists and is wiab-writable.
+      "sudo install -d -o wiab -g wiab /var/lib/wiab /var/lib/wiab/git",
+      # Persistent git SSH host key so clients don't see a changing key after each reboot.
+      "sudo test -f /etc/wiab/git_ssh_host_key || sudo ssh-keygen -t ed25519 -N '' -C wiab-git -f /etc/wiab/git_ssh_host_key",
+      "sudo chown wiab:wiab /etc/wiab/git_ssh_host_key /etc/wiab/git_ssh_host_key.pub",
+      "sudo chmod 600 /etc/wiab/git_ssh_host_key",
+      # Idempotent: drop the managed keys, then append current values. wiab.env is a systemd
+      # EnvironmentFile (read to end-of-line, no shell interpretation), so values are literal.
+      "sudo sed -i '/^WIAB_BASE_URL=/d;/^WIAB_AUTH_LOCAL_SIGNUP=/d;/^WIAB_EMAIL_PROVIDER=/d;/^WIAB_EMAIL_FROM=/d;/^RESEND_API_KEY=/d;/^WIAB_AUTH_GOOGLE_ENABLED=/d;/^WIAB_GOOGLE_CLIENT_ID=/d;/^WIAB_GOOGLE_CLIENT_SECRET=/d;/^WIAB_AUTH_OIDC_ENABLED=/d;/^WIAB_OIDC_ISSUER=/d;/^WIAB_OIDC_CLIENT_ID=/d;/^WIAB_OIDC_CLIENT_SECRET=/d;/^WIAB_GIT_ROOT=/d;/^WIAB_GIT_SSH_HOST_KEY=/d' /etc/wiab/wiab.env",
+      "echo 'WIAB_BASE_URL=https://${var.domain}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_AUTH_LOCAL_SIGNUP=${var.auth_local_signup}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_EMAIL_PROVIDER=resend' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_EMAIL_FROM=${var.email_from}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'RESEND_API_KEY=${var.resend_api_key}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_AUTH_GOOGLE_ENABLED=${local.google_enabled}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_GOOGLE_CLIENT_ID=${var.google_client_id}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_GOOGLE_CLIENT_SECRET=${var.google_client_secret}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_AUTH_OIDC_ENABLED=${local.oidc_enabled}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_OIDC_ISSUER=${var.oidc_issuer}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_OIDC_CLIENT_ID=${var.oidc_client_id}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_OIDC_CLIENT_SECRET=${var.oidc_client_secret}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_GIT_ROOT=${var.git_root}' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "echo 'WIAB_GIT_SSH_HOST_KEY=/etc/wiab/git_ssh_host_key' | sudo tee -a /etc/wiab/wiab.env >/dev/null",
+      "sudo systemctl restart wiab || true",
+      # Health-gate the restart so a bad identity/email config fails the apply loudly.
+      "for i in $(seq 1 15); do curl -fsSk -o /dev/null https://127.0.0.1:8080/health && exit 0; sleep 1; done; echo 'wiab unhealthy after configure_app' >&2; exit 1",
+    ]
+  }
+}
+
 # Deploys the pinned backend/frontend versions AND reconciles the model set over SSH.
 # Re-runs whenever a version variable, the `models` map, or the models URL/data dir changes
 # (bump/edit and apply) WITHOUT recreating the VM. On first apply it waits for cloud-init to
@@ -203,6 +272,7 @@ resource "null_resource" "deploy_app" {
     null_resource.enable_nested_virt,
     null_resource.provision_db,
     null_resource.reconfigure_proxy,
+    null_resource.configure_app,
   ]
 
   triggers = {
@@ -230,7 +300,7 @@ resource "null_resource" "deploy_app" {
         # WIAB_WHISPER_*), not the multi-token auth flags which live in wiab.env/oidc.env.
         "sudo sed -i '/^WIAB_DATA_DIR=/d;/^WIAB_MODELS_URL=/d;/^WIAB_[A-Z0-9]*_ENABLED=/d;/^WIAB_[A-Z0-9]*_MODEL_FILE=/d' /etc/wiab/provision.env",
         "echo 'WIAB_DATA_DIR=${var.wiab_data_dir}' | sudo tee -a /etc/wiab/provision.env >/dev/null",
-        "echo 'WIAB_MODELS_URL=${var.wiab_models_url}' | sudo tee -a /etc/wiab/provision.env >/dev/null",
+        "echo \"WIAB_MODELS_URL='${var.wiab_models_url}'\" | sudo tee -a /etc/wiab/provision.env >/dev/null",
       ],
       [for line in local.model_env_lines : "echo '${line}' | sudo tee -a /etc/wiab/provision.env >/dev/null"],
       [
