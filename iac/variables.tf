@@ -199,6 +199,69 @@ variable "models" {
 }
 
 # ---------------------------------------------------------------------------
+# Identity / auth / email. Written to /etc/wiab/wiab.env (the systemd
+# EnvironmentFile) over SSH and in-place updatable — edit and `terraform apply`,
+# no VM rebuild. Google and OIDC turn on automatically once their credentials are
+# non-empty (see locals in main.tf); leave blank to keep them off.
+# ---------------------------------------------------------------------------
+variable "auth_local_signup" {
+  type        = bool
+  description = "Enable local email+password signup (WIAB_AUTH_LOCAL_SIGNUP)."
+  default     = true
+}
+
+variable "email_from" {
+  type        = string
+  description = "From address for transactional email — must be a domain verified in Resend."
+  default     = "no-reply@workinabox.ai"
+}
+
+variable "resend_api_key" {
+  type        = string
+  description = "Resend API key (RESEND_API_KEY). Empty = email logs the link only, no send."
+  default     = ""
+  sensitive   = true
+}
+
+variable "google_client_id" {
+  type        = string
+  description = "Google OAuth client ID. Set together with google_client_secret to enable Google sign-in."
+  default     = ""
+}
+
+variable "google_client_secret" {
+  type        = string
+  description = "Google OAuth client secret."
+  default     = ""
+  sensitive   = true
+}
+
+variable "oidc_issuer" {
+  type        = string
+  description = "Enterprise OIDC issuer URL (e.g. Microsoft Entra). Set with client id+secret to enable."
+  default     = ""
+}
+
+variable "oidc_client_id" {
+  type        = string
+  description = "Enterprise OIDC client ID."
+  default     = ""
+}
+
+variable "oidc_client_secret" {
+  type        = string
+  description = "Enterprise OIDC client secret."
+  default     = ""
+  sensitive   = true
+}
+
+variable "git_root" {
+  type        = string
+  description = "Durable directory for hosted git repos (WIAB_GIT_ROOT). Default keeps repos off /tmp."
+  default     = "/var/lib/wiab/git"
+}
+
+# ---------------------------------------------------------------------------
 # Firecracker smoke-test artifacts (bump as upstream rotates them)
 # ---------------------------------------------------------------------------
 variable "fc_test_kernel_url" {
