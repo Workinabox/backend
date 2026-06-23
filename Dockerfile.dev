@@ -1,6 +1,6 @@
 # Local-development image for the wiab backend.
 #
-# Production ships a binary release (see iac/); this image is only for the local stack in
+# Production ships a binary release (see the workinabox/iac repo); this image is only for the local stack in
 # dev/local/docker-compose.yml. It installs the Rust toolchain plus the native build
 # dependencies, then runs `cargo run` against the bind-mounted source. Compiled output and
 # the cargo registry live in named volumes, so only the first build is slow.
