@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the local model files (Llama LLM, Whisper STT) from Azure blob storage into the
 # standard data dir so the backend can load them. Mirrors the deploy-time fetch in
-# iac/scripts/wiab-deploy.sh. Requires azcopy on PATH (macOS: `brew install azcopy`).
+# the iac repo's scripts/wiab-deploy.sh. Requires azcopy on PATH (macOS: `brew install azcopy`).
 #
 # Config (env):
 #   WIAB_MODELS_URL  Azure container URL WITH a SAS token, e.g.
@@ -22,7 +22,7 @@ is_enabled() {
 }
 
 # Roles are discovered generically from the WIAB_<ROLE>_MODEL_FILE vars in the environment,
-# so any number of model slots works (same scan as iac/scripts/wiab-deploy.sh).
+# so any number of model slots works (same scan as the iac repo's scripts/wiab-deploy.sh).
 roles_with_files() { compgen -A variable | grep -E '^WIAB_[A-Z0-9]+_MODEL_FILE$' || true; }
 
 any_enabled=0
