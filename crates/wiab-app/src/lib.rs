@@ -19,6 +19,9 @@ mod repo_application_service;
 mod repo_requests;
 mod user_application_service;
 mod user_requests;
+mod vm_application_service;
+mod vm_requests;
+mod vm_runtime;
 mod work_application_service;
 
 pub use access_application_service::AccessApplicationService;
@@ -46,4 +49,7 @@ pub use user_application_service::UserApplicationService;
 pub use user_requests::{
     AddSshKeyRequest, CreateUserRequest, IssueTokenRequest, IssuedTokenSnapshot,
 };
+pub use vm_application_service::VmApplicationService;
+pub use vm_requests::ProvisionVmRequest;
+pub use vm_runtime::{RuntimeHandle, VmRuntime, VmRuntimeError, VmSpec};
 pub use work_application_service::WorkApplicationService;

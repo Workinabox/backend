@@ -17,15 +17,17 @@ use wiab_core::project::{Project, ProjectId, ProjectRepository};
 use wiab_core::repo::{Repo, RepoId, RepoRepository};
 use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::user::{User, UserId, UserRepository};
+use wiab_core::vm::{Vm, VmId, VmRepository};
 use wiab_core::work::{Work, WorkId, WorkRepository};
 
 use crate::{
     InMemoryAgentRepository, InMemoryBoardRepository, InMemoryOrganizationRepository,
     InMemoryPipelineRepository, InMemoryProjectRepository, InMemoryRepoRepository,
-    InMemoryRoleAssignmentRepository, InMemoryUserRepository, InMemoryWorkRepository,
-    PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
-    PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
-    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresWorkRepository,
+    InMemoryRoleAssignmentRepository, InMemoryUserRepository, InMemoryVmRepository,
+    InMemoryWorkRepository, PostgresAgentRepository, PostgresBoardRepository,
+    PostgresOrganizationRepository, PostgresPipelineRepository, PostgresProjectRepository,
+    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresUserRepository,
+    PostgresVmRepository, PostgresWorkRepository,
 };
 
 #[derive(Clone)]
@@ -257,6 +259,35 @@ impl UserRepository for UserRepo {
     }
 
     async fn list(&self) -> Result<Vec<User>, RepoError> {
+        match self {
+            Self::InMemory(repo) => repo.list().await,
+            Self::Postgres(repo) => repo.list().await,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum VmRepo {
+    InMemory(InMemoryVmRepository),
+    Postgres(PostgresVmRepository),
+}
+
+impl VmRepository for VmRepo {
+    async fn save(&self, vm: Vm, expected: Version) -> Result<Version, SaveError> {
+        match self {
+            Self::InMemory(repo) => repo.save(vm, expected).await,
+            Self::Postgres(repo) => repo.save(vm, expected).await,
+        }
+    }
+
+    async fn get(&self, id: &VmId) -> Result<Option<(Vm, Version)>, RepoError> {
+        match self {
+            Self::InMemory(repo) => repo.get(id).await,
+            Self::Postgres(repo) => repo.get(id).await,
+        }
+    }
+
+    async fn list(&self) -> Result<Vec<Vm>, RepoError> {
         match self {
             Self::InMemory(repo) => repo.list().await,
             Self::Postgres(repo) => repo.list().await,
