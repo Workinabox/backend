@@ -23,6 +23,9 @@ pub mod in_memory_role_assignment_numbering;
 pub mod in_memory_role_assignment_repository;
 pub mod in_memory_user_numbering;
 pub mod in_memory_user_repository;
+pub mod in_memory_vm_numbering;
+pub mod in_memory_vm_repository;
+pub mod in_memory_vm_runtime;
 pub mod in_memory_work_numbering;
 pub mod in_memory_work_repository;
 pub mod llama_meeting_intelligence;
@@ -37,6 +40,7 @@ pub mod postgres_project_repository;
 pub mod postgres_repo_repository;
 pub mod postgres_role_assignment_repository;
 pub mod postgres_user_repository;
+pub mod postgres_vm_repository;
 pub mod postgres_work_repository;
 pub mod repository_dispatch;
 pub mod sfu;
@@ -71,6 +75,9 @@ pub use in_memory_role_assignment_numbering::InMemoryRoleAssignmentNumbering;
 pub use in_memory_role_assignment_repository::InMemoryRoleAssignmentRepository;
 pub use in_memory_user_numbering::InMemoryUserNumbering;
 pub use in_memory_user_repository::InMemoryUserRepository;
+pub use in_memory_vm_numbering::InMemoryVmNumbering;
+pub use in_memory_vm_repository::InMemoryVmRepository;
+pub use in_memory_vm_runtime::InMemoryVmRuntime;
 pub use in_memory_work_numbering::InMemoryWorkNumbering;
 pub use in_memory_work_repository::InMemoryWorkRepository;
 pub use llama_meeting_intelligence::LlamaMeetingIntelligence;
@@ -82,10 +89,11 @@ pub use postgres_project_repository::PostgresProjectRepository;
 pub use postgres_repo_repository::PostgresRepoRepository;
 pub use postgres_role_assignment_repository::PostgresRoleAssignmentRepository;
 pub use postgres_user_repository::PostgresUserRepository;
+pub use postgres_vm_repository::PostgresVmRepository;
 pub use postgres_work_repository::PostgresWorkRepository;
 pub use repository_dispatch::{
     AgentRepo, BoardRepo, OrganizationRepo, PipelineRepo, ProjectRepo, RepoRepo,
-    RoleAssignmentRepo, UserRepo, WorkRepo,
+    RoleAssignmentRepo, UserRepo, VmRepo, WorkRepo,
 };
 pub use sfu::{Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;
