@@ -153,7 +153,10 @@ mod tests {
 
     impl VmRepository for TestVmRepository {
         async fn save(&self, vm: Vm, expected: Version) -> Result<Version, SaveError> {
-            let mut vms = self.vms.write().expect("test repository write lock poisoned");
+            let mut vms = self
+                .vms
+                .write()
+                .expect("test repository write lock poisoned");
             let current = vms.get(&vm.id()).map(|(_, version)| *version).unwrap_or(0);
             if current != expected.value() {
                 return Err(SaveError::Conflict);
