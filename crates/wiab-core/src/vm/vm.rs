@@ -1,8 +1,9 @@
+use crate::agent::AgentId;
 use crate::organization::OrganizationId;
 use crate::vm::{VmError, VmId, VmResources, VmSnapshot, VmState, VmTemplate};
 
-/// A microVM sandbox: a `VM-###` id, the organization it belongs to, the template it boots
-/// from, its compute sizing, its lifecycle state, and — once running — its guest IP.
+/// A microVM sandbox: a `VM-###` id, the organization and agent it was booted for, the template
+/// it boots from, its compute sizing, its lifecycle state, and — once running — its guest IP.
 ///
 /// The lifecycle is a small state machine (see [`VmState`]): a VM is born `Creating`, becomes
 /// `Running` when the runtime reports an endpoint, and is either `Stopped` (graceful) or
@@ -12,6 +13,7 @@ use crate::vm::{VmError, VmId, VmResources, VmSnapshot, VmState, VmTemplate};
 pub struct Vm {
     id: VmId,
     organization_id: OrganizationId,
+    agent_id: AgentId,
     template: VmTemplate,
     resources: VmResources,
     state: VmState,
@@ -19,16 +21,18 @@ pub struct Vm {
 }
 
 impl Vm {
-    /// Provision a new VM in the `Creating` state, not yet booted.
+    /// Provision a new VM in the `Creating` state, not yet booted, for the given agent.
     pub fn new(
         id: VmId,
         organization_id: OrganizationId,
+        agent_id: AgentId,
         template: VmTemplate,
         resources: VmResources,
     ) -> Self {
         Self {
             id,
             organization_id,
+            agent_id,
             template,
             resources,
             state: VmState::Creating,
@@ -38,9 +42,11 @@ impl Vm {
 
     /// Rebuild a VM from persisted fields. Used by repository implementations to rehydrate an
     /// aggregate; application code goes through [`Vm::new`] and the transition methods.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         id: VmId,
         organization_id: OrganizationId,
+        agent_id: AgentId,
         template: VmTemplate,
         resources: VmResources,
         state: VmState,
@@ -49,6 +55,7 @@ impl Vm {
         Self {
             id,
             organization_id,
+            agent_id,
             template,
             resources,
             state,
@@ -62,6 +69,10 @@ impl Vm {
 
     pub fn organization_id(&self) -> OrganizationId {
         self.organization_id
+    }
+
+    pub fn agent_id(&self) -> AgentId {
+        self.agent_id
     }
 
     pub fn template(&self) -> &VmTemplate {
@@ -111,6 +122,7 @@ impl Vm {
         VmSnapshot {
             id: self.id.to_string(),
             organization_id: self.organization_id.to_string(),
+            agent_id: self.agent_id.to_string(),
             template: self.template.to_string(),
             state: self.state.to_string(),
             guest_ip: self.guest_ip.clone(),
@@ -128,6 +140,7 @@ mod tests {
         Vm::new(
             VmId::from_number(1),
             OrganizationId::from_number(1),
+            AgentId::from_number(1),
             VmTemplate::new("developer").unwrap(),
             VmResources::default(),
         )

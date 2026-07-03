@@ -104,6 +104,9 @@ jobs:
           cp -P "$libdir"/libllama.so* "$libdir"/libggml*.so* pkg/lib/
           tar czf wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.tar.gz -C pkg wiab lib
           sha256sum pkg/wiab | sed 's# .*# wiab#' > wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
+          # Guest agent: a self-contained binary staged to the demo and mounted into each microVM.
+          cp wiab-agent wiab-agent-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu
+          sha256sum wiab-agent | sed 's# .*# wiab-agent#' > wiab-agent-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -112,6 +115,8 @@ jobs:
           path: |
             target/release/wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.tar.gz
             target/release/wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
+            target/release/wiab-agent-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu
+            target/release/wiab-agent-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
           if-no-files-found: error
 
   upload:

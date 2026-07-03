@@ -13,6 +13,7 @@ members = [
     "crates/authbox-core",
     "crates/authbox-app",
     "crates/authbox-inf",
+    "crates/wiab-agent",
 ]
 
 [workspace.dependencies]

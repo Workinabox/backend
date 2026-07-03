@@ -72,6 +72,8 @@ pub fn router(state: AppState) -> Router {
             get(list_pipelines).post(create_pipeline),
         )
         .route("/agents/{agent_id}", put(update_agent).get(get_agent))
+        .route("/agents/{agent_id}/activate", post(activate_agent))
+        .route("/agents/{agent_id}/deactivate", post(deactivate_agent))
         .route("/boards/{board_id}", put(update_board).get(get_board))
         .route("/repos/{repo_id}", put(update_repo).get(get_repo))
         .route("/repos/{repo_id}/branches", get(list_branches))
@@ -377,6 +379,36 @@ async fn update_agent(
     match state
         .agent_service
         .update_agent(&agent_id, request)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("agent", &agent_id)),
+    }
+}
+
+async fn activate_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
+    match state
+        .agent_service
+        .activate_agent(&agent_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("agent", &agent_id)),
+    }
+}
+
+async fn deactivate_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
+    match state
+        .agent_service
+        .deactivate_agent(&agent_id)
         .await
         .map_err(bad_request)?
     {

@@ -1,4 +1,5 @@
 use deadpool_postgres::Pool;
+use wiab_core::agent::AgentId;
 use wiab_core::organization::OrganizationId;
 use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::vm::{Vm, VmId, VmRepository, VmResources, VmState, VmTemplate};
@@ -24,10 +25,12 @@ fn save_error<E: std::fmt::Display>(error: E) -> SaveError {
     SaveError::Backend(error.to_string())
 }
 
-/// Rebuild a `Vm` from a row's columns: (organization_id, template, state, guest_ip, vcpus, mem_mib).
+/// Rebuild a `Vm` from a row's columns.
+#[allow(clippy::too_many_arguments)]
 fn vm_from_columns(
     id: VmId,
     organization_id: String,
+    agent_id: String,
     template: String,
     state: String,
     guest_ip: Option<String>,
@@ -35,12 +38,14 @@ fn vm_from_columns(
     mem_mib: i64,
 ) -> Result<Vm, RepoError> {
     let organization_id: OrganizationId = organization_id.parse().map_err(repo_error)?;
+    let agent_id: AgentId = agent_id.parse().map_err(repo_error)?;
     let template = VmTemplate::new(template).map_err(repo_error)?;
     let state: VmState = state.parse().map_err(repo_error)?;
     let resources = VmResources::new(vcpus as u32, mem_mib as u32);
     Ok(Vm::from_parts(
         id,
         organization_id,
+        agent_id,
         template,
         resources,
         state,
@@ -55,6 +60,7 @@ impl VmRepository for PostgresVmRepository {
         let next = expected.next();
         let next_version = next.value() as i64;
         let organization_id = vm.organization_id().to_string();
+        let agent_id = vm.agent_id().to_string();
         let template = vm.template().name().to_owned();
         let state = vm.state().to_string();
         let guest_ip = vm.guest_ip().map(|ip| ip.to_owned());
@@ -64,12 +70,13 @@ impl VmRepository for PostgresVmRepository {
             client
                 .execute(
                     "INSERT INTO vm \
-                     (id, version, organization_id, template, state, guest_ip, vcpus, mem_mib) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id) DO NOTHING",
+                     (id, version, organization_id, agent_id, template, state, guest_ip, vcpus, mem_mib) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING",
                     &[
                         &id,
                         &next_version,
                         &organization_id,
+                        &agent_id,
                         &template,
                         &state,
                         &guest_ip,
@@ -82,13 +89,14 @@ impl VmRepository for PostgresVmRepository {
         } else {
             client
                 .execute(
-                    "UPDATE vm SET version = $2, organization_id = $3, template = $4, \
-                     state = $5, guest_ip = $6, vcpus = $7, mem_mib = $8 \
-                     WHERE id = $1 AND version = $9",
+                    "UPDATE vm SET version = $2, organization_id = $3, agent_id = $4, \
+                     template = $5, state = $6, guest_ip = $7, vcpus = $8, mem_mib = $9 \
+                     WHERE id = $1 AND version = $10",
                     &[
                         &id,
                         &next_version,
                         &organization_id,
+                        &agent_id,
                         &template,
                         &state,
                         &guest_ip,
@@ -110,7 +118,7 @@ impl VmRepository for PostgresVmRepository {
         let client = self.pool.get().await.map_err(repo_error)?;
         let row = client
             .query_opt(
-                "SELECT version, organization_id, template, state, guest_ip, vcpus, mem_mib \
+                "SELECT version, organization_id, agent_id, template, state, guest_ip, vcpus, mem_mib \
                  FROM vm WHERE id = $1",
                 &[&id.to_string()],
             )
@@ -128,6 +136,7 @@ impl VmRepository for PostgresVmRepository {
                     row.get(4),
                     row.get(5),
                     row.get(6),
+                    row.get(7),
                 )?;
                 Ok(Some((vm, Version::from_value(version as u64))))
             }
@@ -138,7 +147,8 @@ impl VmRepository for PostgresVmRepository {
         let client = self.pool.get().await.map_err(repo_error)?;
         let rows = client
             .query(
-                "SELECT id, organization_id, template, state, guest_ip, vcpus, mem_mib FROM vm",
+                "SELECT id, organization_id, agent_id, template, state, guest_ip, vcpus, mem_mib \
+                 FROM vm",
                 &[],
             )
             .await
@@ -155,6 +165,7 @@ impl VmRepository for PostgresVmRepository {
                     row.get(4),
                     row.get(5),
                     row.get(6),
+                    row.get(7),
                 )
             })
             .collect()

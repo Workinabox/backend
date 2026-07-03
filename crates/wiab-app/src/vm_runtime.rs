@@ -5,6 +5,9 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmSpec {
     pub id: String,
+    /// The agent this VM is booted for; the runtime bakes it into the guest so `wiab-agent`
+    /// runs as this agent.
+    pub agent_id: String,
     pub template: String,
     pub vcpus: u32,
     pub mem_mib: u32,

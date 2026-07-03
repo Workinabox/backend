@@ -1,0 +1,11 @@
+[package]
+name = "wiab-agent"
+version = "0.1.0"
+edition = "2024"
+
+# The in-guest agent runs inside a Firecracker microVM. Kept intentionally dependency-light
+# (std only, plus a linux-gated vsock client) so it builds fast and stays small on the rootfs.
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
