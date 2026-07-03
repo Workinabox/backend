@@ -90,9 +90,9 @@ jobs:
 
       - name: Build release
         # wiab-agent is a workspace member but not a dependency of the `wiab` package, so a
-        # plain `cargo build --release` (root package only) never builds it. Build both bins
-        # the Package step ships.
-        run: cargo build --release --bin wiab --bin wiab-agent
+        # plain `cargo build --release` (root package only) never builds it, and `--bin
+        # wiab-agent` isn't visible from the root package either. Select both packages.
+        run: cargo build --release -p wiab -p wiab-agent
 
       - name: Package binary
         shell: bash
