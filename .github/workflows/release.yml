@@ -89,10 +89,11 @@ jobs:
         run: rustup component add rustfmt
 
       - name: Build release
-        # wiab-agent is a workspace member but not a dependency of the `wiab` package, so a
-        # plain `cargo build --release` (root package only) never builds it, and `--bin
-        # wiab-agent` isn't visible from the root package either. Select both packages.
-        run: cargo build --release -p wiab -p wiab-agent
+        # Root Cargo.toml is a package (`wiab`) AND a workspace, so a plain `cargo build`
+        # builds only the root package — not wiab-agent, which is a member but not a
+        # dependency of `wiab`. --workspace builds every member, incl. the wiab-agent bin
+        # the Package step ships.
+        run: cargo build --release --workspace
 
       - name: Package binary
         shell: bash
