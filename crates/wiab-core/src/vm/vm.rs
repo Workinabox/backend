@@ -208,4 +208,24 @@ mod tests {
         assert_eq!(snapshot.vcpus, 2);
         assert_eq!(snapshot.mem_mib, 1024);
     }
+
+    #[test]
+    fn from_parts_round_trips_all_fields() {
+        let vm = Vm::from_parts(
+            VmId::from_number(3),
+            OrganizationId::from_number(4),
+            AgentId::from_number(5),
+            VmTemplate::new("base").unwrap(),
+            VmResources::new(8, 4096),
+            VmState::Running,
+            Some("10.0.0.2".to_owned()),
+        );
+        assert_eq!(vm.id(), VmId::from_number(3));
+        assert_eq!(vm.organization_id(), OrganizationId::from_number(4));
+        assert_eq!(vm.agent_id(), AgentId::from_number(5));
+        assert_eq!(vm.template(), &VmTemplate::new("base").unwrap());
+        assert_eq!(vm.resources(), VmResources::new(8, 4096));
+        assert_eq!(vm.state(), VmState::Running);
+        assert_eq!(vm.guest_ip(), Some("10.0.0.2"));
+    }
 }

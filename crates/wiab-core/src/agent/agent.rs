@@ -288,4 +288,24 @@ mod tests {
         assert_eq!(snapshot.vm_id.as_deref(), Some("VM-5"));
         assert_eq!(snapshot.guest_ip, None);
     }
+
+    #[test]
+    fn from_parts_round_trips_all_fields() {
+        let agent = Agent::from_parts(
+            AgentId::from_number(2),
+            OrganizationId::from_number(3),
+            "Scout".to_owned(),
+            "desc".to_owned(),
+            Some(developer()),
+            true,
+            Some(VmId::from_number(9)),
+        );
+        assert_eq!(agent.id(), AgentId::from_number(2));
+        assert_eq!(agent.organization_id(), OrganizationId::from_number(3));
+        assert_eq!(agent.name(), "Scout");
+        assert_eq!(agent.description(), "desc");
+        assert_eq!(agent.vm_template(), Some(&developer()));
+        assert!(agent.is_active());
+        assert_eq!(agent.vm_id(), Some(VmId::from_number(9)));
+    }
 }
