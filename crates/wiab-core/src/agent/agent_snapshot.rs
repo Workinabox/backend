@@ -8,4 +8,11 @@ pub struct AgentSnapshot {
     pub organization_id: String,
     pub name: String,
     pub description: String,
+    /// The assigned VM type (template name), if any.
+    pub vm_type: Option<String>,
+    pub active: bool,
+    /// The VM booted for this agent while active.
+    pub vm_id: Option<String>,
+    /// The active VM's guest IP; filled by the application layer (not carried on the aggregate).
+    pub guest_ip: Option<String>,
 }

@@ -12,13 +12,17 @@ use wiab_app::{
     AccessApplicationService, AgentApplicationService, AuthorizationService,
     BoardApplicationService, MeetingApplicationService, OrganizationApplicationService,
     PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
-    UserApplicationService, WorkApplicationService,
+    UserApplicationService, VmApplicationService, WorkApplicationService,
 };
 
 use crate::{
     AgentRepo, BoardRepo, InMemoryMeetingRepository, OrganizationRepo, PipelineRepo, ProjectRepo,
-    RepoRepo, RoleAssignmentRepo, Sfu, UserRepo, WiabUserDirectory, WorkRepo,
+    RepoRepo, RoleAssignmentRepo, Sfu, UserRepo, VmRepo, VmRuntimeDispatch, WiabUserDirectory,
+    WorkRepo,
 };
+
+/// The fully-resolved vm application service (its runtime is chosen at boot — see bootstrap).
+pub type WiabVmService = VmApplicationService<VmRepo, OrganizationRepo, VmRuntimeDispatch>;
 
 /// The fully-resolved auth service type once WIAB picks its stores and user directory.
 pub type WiabAuthService =
@@ -63,7 +67,7 @@ pub struct AppState {
     pub meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
     pub organization_service: Arc<OrganizationApplicationService<OrganizationRepo>>,
     pub project_service: Arc<ProjectApplicationService<ProjectRepo, OrganizationRepo>>,
-    pub agent_service: Arc<AgentApplicationService<AgentRepo, OrganizationRepo>>,
+    pub agent_service: Arc<AgentApplicationService<AgentRepo, OrganizationRepo, WiabVmService>>,
     pub board_service: Arc<BoardApplicationService<BoardRepo, ProjectRepo>>,
     pub repo_service: Arc<RepoApplicationService<RepoRepo, ProjectRepo>>,
     pub user_service: Arc<UserApplicationService<UserRepo>>,

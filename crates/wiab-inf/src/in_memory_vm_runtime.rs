@@ -71,6 +71,7 @@ mod tests {
     fn spec(id: &str) -> VmSpec {
         VmSpec {
             id: id.to_owned(),
+            agent_id: "A-1".to_owned(),
             template: "developer".to_owned(),
             vcpus: 2,
             mem_mib: 1024,

@@ -21,7 +21,7 @@ use wiab_app::{
     BoardApplicationService, CreateOrganizationRequest, CreateProjectRequest, CreateUserRequest,
     IssueTokenRequest, MeetingApplicationService, OrganizationApplicationService,
     PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
-    UserApplicationService, WorkApplicationService,
+    UserApplicationService, VmApplicationService, WorkApplicationService,
 };
 use wiab_core::{
     access::{Role, RoleAssignmentRepository, Scope},
@@ -34,21 +34,24 @@ use wiab_core::{
     repo::{GitBackend, RepoRepository},
     transcript::FinalizedTranscript,
     user::{UserId, UserRepository},
+    vm::VmRepository,
     work::WorkRepository,
 };
 use wiab_inf::{
-    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, Git2Backend,
-    InMemoryAgentNumbering, InMemoryAgentRepository, InMemoryBoardNumbering,
-    InMemoryBoardRepository, InMemoryMeetingRepository, InMemoryOrganizationNumbering,
-    InMemoryOrganizationRepository, InMemoryPipelineNumbering, InMemoryPipelineRepository,
-    InMemoryProjectNumbering, InMemoryProjectRepository, InMemoryRepoNumbering,
-    InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
-    InMemoryUserNumbering, InMemoryUserRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
-    LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
-    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
-    PostgresProjectRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
-    PostgresUserRepository, PostgresWorkRepository, ProjectRepo, RandomTokenFactory, RepoRepo,
-    RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo,
+    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, FirecrackerConfig,
+    FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering, InMemoryAgentRepository,
+    InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
+    InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
+    InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
+    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
+    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
+    InMemoryVmNumbering, InMemoryVmRepository, InMemoryVmRuntime, InMemoryWorkNumbering,
+    InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo,
+    PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
+    PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
+    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresVmRepository,
+    PostgresWorkRepository, ProjectRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu,
+    Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo, VmRepo, VmRuntimeDispatch,
     WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
@@ -117,6 +120,29 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         Arc::new(project_numbering),
     ));
 
+    // VM service. The runtime is Firecracker only when enabled AND /dev/kvm is present (the demo
+    // host); otherwise in-memory, so the backend runs on a Mac / CI / non-KVM host unchanged.
+    let vm_repo = match &pool {
+        Some(pool) => VmRepo::Postgres(PostgresVmRepository::new(pool.clone())),
+        None => VmRepo::InMemory(InMemoryVmRepository::new()),
+    };
+    let vm_numbering =
+        InMemoryVmNumbering::starting_at(next_after(&vm_repo.list().await?, |vm| vm.id().number()));
+    let vm_runtime =
+        if env_flag("WIAB_FIRECRACKER_ENABLED") && std::path::Path::new("/dev/kvm").exists() {
+            info!("vm runtime: firecracker (/dev/kvm present)");
+            VmRuntimeDispatch::Firecracker(FirecrackerRuntime::new(FirecrackerConfig::from_env()))
+        } else {
+            info!("vm runtime: in-memory (firecracker disabled or /dev/kvm absent)");
+            VmRuntimeDispatch::InMemory(InMemoryVmRuntime::new())
+        };
+    let vm_service = VmApplicationService::new(
+        vm_repo,
+        organization_repo.clone(),
+        vm_runtime,
+        Arc::new(vm_numbering),
+    );
+
     let agent_repo = match &pool {
         Some(pool) => AgentRepo::Postgres(PostgresAgentRepository::new(pool.clone())),
         None => AgentRepo::InMemory(InMemoryAgentRepository::new()),
@@ -128,6 +154,7 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
     let agent_service = Arc::new(AgentApplicationService::new(
         agent_repo,
         organization_repo.clone(),
+        vm_service,
         Arc::new(agent_numbering),
     ));
 

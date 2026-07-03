@@ -1,6 +1,7 @@
 pub mod agent_audio_transport;
 pub mod app_state;
 pub mod credential_crypto;
+pub mod firecracker_runtime;
 pub mod git2_backend;
 pub mod git_http;
 pub mod git_ssh;
@@ -47,6 +48,8 @@ pub mod sfu;
 pub mod speech_synthesizer;
 pub mod system_clock;
 pub mod transcription;
+pub mod vm_comms_broker;
+pub mod vm_runtime_dispatch;
 pub mod wiab_user_directory;
 
 pub use app_state::{
@@ -54,6 +57,7 @@ pub use app_state::{
     WiabPasswordResetService,
 };
 pub use credential_crypto::{RandomTokenFactory, Sha256KeyFingerprinter, Sha256TokenHasher};
+pub use firecracker_runtime::{FirecrackerConfig, FirecrackerRuntime};
 pub use git_ssh::spawn_git_ssh_server;
 pub use git2_backend::Git2Backend;
 pub use heuristic_meeting_intelligence::HeuristicMeetingIntelligence;
@@ -98,4 +102,5 @@ pub use repository_dispatch::{
 pub use sfu::{Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;
 pub use system_clock::SystemClock;
+pub use vm_runtime_dispatch::VmRuntimeDispatch;
 pub use wiab_user_directory::WiabUserDirectory;

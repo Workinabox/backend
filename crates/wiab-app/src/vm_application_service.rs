@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use wiab_core::agent::AgentId;
 use wiab_core::organization::{OrganizationId, OrganizationRepository};
 use wiab_core::repository::{SaveError, Version};
 use wiab_core::vm::{Vm, VmId, VmNumbering, VmRepository, VmResources, VmSnapshot, VmTemplate};
@@ -69,9 +70,11 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
     pub async fn provision_vm(
         &self,
         organization_id: &str,
+        agent_id: &str,
         request: ProvisionVmRequest,
     ) -> anyhow::Result<Option<VmSnapshot>> {
         let organization_id: OrganizationId = organization_id.parse()?;
+        let agent_id: AgentId = agent_id.parse()?;
         if self
             .organization_repository
             .get(&organization_id)
@@ -87,11 +90,18 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
             request.vcpus.unwrap_or(defaults.vcpus()),
             request.mem_mib.unwrap_or(defaults.mem_mib()),
         );
-        let mut vm = Vm::new(self.numbering.next(), organization_id, template, resources);
+        let mut vm = Vm::new(
+            self.numbering.next(),
+            organization_id,
+            agent_id,
+            template,
+            resources,
+        );
         let version = self.vm_repository.save(vm.clone(), Version::NEW).await?;
 
         let spec = VmSpec {
             id: vm.id().to_string(),
+            agent_id: vm.agent_id().to_string(),
             template: vm.template().name().to_owned(),
             vcpus: resources.vcpus(),
             mem_mib: resources.mem_mib(),
@@ -324,7 +334,7 @@ mod tests {
         let service = service(StubRuntime);
         let organization_id = seed_organization(&service, 1).await;
         let vm = service
-            .provision_vm(&organization_id, provision("developer"))
+            .provision_vm(&organization_id, "A-1", provision("developer"))
             .await
             .unwrap()
             .expect("organization should exist");
@@ -339,7 +349,7 @@ mod tests {
         let service = service(StubRuntime);
         let organization_id = seed_organization(&service, 1).await;
         let vm = service
-            .provision_vm(&organization_id, provision("developer"))
+            .provision_vm(&organization_id, "A-1", provision("developer"))
             .await
             .unwrap()
             .unwrap();
@@ -362,6 +372,7 @@ mod tests {
         let vm = service
             .provision_vm(
                 &organization_id,
+                "A-1",
                 ProvisionVmRequest {
                     template: "developer".to_owned(),
                     vcpus: Some(4),
@@ -379,7 +390,7 @@ mod tests {
     async fn provision_under_missing_organization_returns_none() {
         let service = service(StubRuntime);
         let result = service
-            .provision_vm("O-9", provision("developer"))
+            .provision_vm("O-9", "A-1", provision("developer"))
             .await
             .unwrap();
         assert!(result.is_none());
@@ -391,7 +402,7 @@ mod tests {
         let organization_id = seed_organization(&service, 1).await;
         assert!(
             service
-                .provision_vm(&organization_id, provision("  "))
+                .provision_vm(&organization_id, "A-1", provision("  "))
                 .await
                 .is_err()
         );
@@ -402,7 +413,7 @@ mod tests {
         let service = service(FailingRuntime);
         let organization_id = seed_organization(&service, 1).await;
         let result = service
-            .provision_vm(&organization_id, provision("developer"))
+            .provision_vm(&organization_id, "A-1", provision("developer"))
             .await;
         assert!(result.is_err());
         // The failed VM is still recorded (VM-1), in the Failed state.
@@ -417,15 +428,15 @@ mod tests {
         let first = seed_organization(&service, 1).await;
         let second = seed_organization(&service, 2).await;
         service
-            .provision_vm(&first, provision("base"))
+            .provision_vm(&first, "A-1", provision("base"))
             .await
             .unwrap();
         service
-            .provision_vm(&second, provision("developer"))
+            .provision_vm(&second, "A-2", provision("developer"))
             .await
             .unwrap();
         service
-            .provision_vm(&first, provision("developer"))
+            .provision_vm(&first, "A-3", provision("developer"))
             .await
             .unwrap();
 
