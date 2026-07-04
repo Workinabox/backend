@@ -30,6 +30,10 @@ pub struct FirecrackerConfig {
     pub jail_base: PathBuf,
     pub jailer_bin: PathBuf,
     pub firecracker_bin: PathBuf,
+    /// Privileged control helper (runs via sudo) used to reach a jailed firecracker's API socket
+    /// and to kill it — the jail chroot is owned by the jail uid, so the backend can't do either
+    /// directly. See `scripts/provision.sh` (`wiab-vmm-ctl`) in the IaC.
+    pub vmm_ctl_bin: PathBuf,
     /// First three octets of `WIAB_MICROVM_SUBNET` (e.g. `172.16.0`).
     pub subnet_prefix: String,
     /// Size of the per-instance overlay drive, MiB.
@@ -59,6 +63,7 @@ impl FirecrackerConfig {
             jail_base: get("WIAB_JAIL_BASE", "/srv/jailer").into(),
             jailer_bin: get("WIAB_JAILER_BIN", "/usr/local/bin/jailer").into(),
             firecracker_bin: get("WIAB_FIRECRACKER_BIN", "/usr/local/bin/firecracker").into(),
+            vmm_ctl_bin: get("WIAB_VMM_CTL_BIN", "/usr/local/bin/wiab-vmm-ctl").into(),
             subnet_prefix,
             overlay_mib: get("WIAB_VM_OVERLAY_MIB", "2048").parse().unwrap_or(2048),
             model_endpoint: get("WIAB_MODEL_ENDPOINT", ""),
@@ -282,7 +287,11 @@ impl VmRuntime for FirecrackerRuntime {
                 "--exec-file",
                 &self.config.firecracker_bin.to_string_lossy(),
                 "--",
-                "--no-api",
+                // Expose the API socket (not --no-api) so the backend keeps a control handle on
+                // the VM — graceful shutdown (SendCtrlAltDel), pause/snapshot later — reached via
+                // the privileged control helper (the socket lives inside the jail uid's chroot).
+                "--api-sock",
+                "firecracker.sock",
                 "--config-file",
                 "config.json",
             ])
@@ -293,11 +302,6 @@ impl VmRuntime for FirecrackerRuntime {
         let pid = child.id().map(|p| p as i64).unwrap_or(-1);
         // Detach: the jailer/firecracker process outlives this call and runs the guest.
         std::mem::forget(child);
-        std::fs::write(
-            self.config.vms_dir.join(&spec.id).join("firecracker.pid"),
-            pid.to_string(),
-        )
-        .map_err(ioerr)?;
 
         // Start listening for this VM's agent check-ins over vsock.
         crate::vm_comms_broker::spawn_agent_listener(
@@ -309,13 +313,36 @@ impl VmRuntime for FirecrackerRuntime {
     }
 
     async fn shutdown(&self, vm_id: &str) -> Result<(), VmRuntimeError> {
-        // Kill the tracked firecracker/jailer process, tear down the tap and the per-VM dir.
-        let pid_path = self.config.vms_dir.join(vm_id).join("firecracker.pid");
-        if let Ok(pid) = std::fs::read_to_string(&pid_path) {
-            let pid = pid.trim();
-            if !pid.is_empty() {
-                let _ = Command::new("sudo").args(["kill", pid]).output().await;
+        // Graceful stop: ask firecracker to Ctrl-Alt-Del the guest (a clean systemd shutdown), then
+        // wait for firecracker to exit on its own; only force-kill if it doesn't. Both the API call
+        // and the kill go through the privileged helper — the jail chroot (and so the API socket)
+        // is owned by the jail uid, unreachable by the backend directly.
+        let ctl = self.config.vmm_ctl_bin.to_string_lossy().to_string();
+        let _ = Command::new("sudo")
+            .args([ctl.as_str(), vm_id, "ctrl-alt-del"])
+            .output()
+            .await;
+        // firecracker's cmdline carries `--id <vm_id>`; poll for it to disappear (up to ~15s).
+        let pattern = format!("firecracker --id {vm_id}");
+        let mut exited = false;
+        for _ in 0..15 {
+            let alive = Command::new("pgrep")
+                .args(["-f", &pattern])
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !alive {
+                exited = true;
+                break;
             }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if !exited {
+            let _ = Command::new("sudo")
+                .args([ctl.as_str(), vm_id, "kill"])
+                .output()
+                .await;
         }
         Self::delete_tap(&Self::tap_name(vm_id)).await;
         let _ = std::fs::remove_dir_all(self.config.vms_dir.join(vm_id));
