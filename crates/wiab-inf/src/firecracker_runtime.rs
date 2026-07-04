@@ -346,11 +346,12 @@ impl VmRuntime for FirecrackerRuntime {
         }
         Self::delete_tap(&Self::tap_name(vm_id)).await;
         let _ = std::fs::remove_dir_all(self.config.vms_dir.join(vm_id));
-        let _ = std::fs::remove_dir_all(
-            self.jail_root(vm_id)
-                .parent()
-                .unwrap_or(&self.config.jail_base),
-        );
+        // The jail chroot is owned by the jail uid (jailer chowns it), so we can't delete it
+        // ourselves — otherwise each stopped VM leaks its ~GB overlay. Remove it via the helper.
+        let _ = Command::new("sudo")
+            .args([ctl.as_str(), vm_id, "cleanup"])
+            .output()
+            .await;
         Ok(())
     }
 }
