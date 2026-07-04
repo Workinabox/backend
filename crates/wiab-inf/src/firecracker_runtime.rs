@@ -11,6 +11,7 @@
 //! `InMemoryVmRuntime`. It shells out and cannot be exercised without KVM, so it is verified on
 //! the demo VM, not in local/CI builds.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use tokio::process::Command;
@@ -129,7 +130,13 @@ impl FirecrackerRuntime {
             .args(["ip", "tuntap", "del", "dev", tap, "mode", "tap"])
             .output()
             .await;
-        run(Command::new("sudo").args(["ip", "tuntap", "add", "dev", tap, "mode", "tap"])).await?;
+        // `user <jail_uid>` hands the tap to the uid the jailed firecracker drops to, so it can
+        // open the tap without CAP_NET_ADMIN.
+        let jail_uid = self.config.jail_uid.to_string();
+        run(Command::new("sudo").args([
+            "ip", "tuntap", "add", "dev", tap, "mode", "tap", "user", &jail_uid,
+        ]))
+        .await?;
         run(Command::new("sudo").args(["ip", "addr", "add", &format!("{gw}/24"), "dev", tap]))
             .await?;
         run(Command::new("sudo").args(["ip", "link", "set", "dev", tap, "up"])).await
@@ -244,6 +251,18 @@ impl VmRuntime for FirecrackerRuntime {
             root.join("config.json"),
             serde_json::to_vec_pretty(&config)
                 .map_err(|e| VmRuntimeError::Runtime(e.to_string()))?,
+        )
+        .map_err(ioerr)?;
+
+        // The jailed firecracker runs as jail_uid/jail_gid, but every file above was created by our
+        // own uid, and we can't chown to another uid without privilege. Widen perms instead so the
+        // jailed process can use its chroot: 0777 on the instance dir (to create its vsock/API
+        // sockets in the chroot cwd) and 0666 on the writable overlay drive. The read-only images
+        // stay world-readable (0644), so no change is needed for them.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).map_err(ioerr)?;
+        std::fs::set_permissions(
+            root.join("overlay.ext4"),
+            std::fs::Permissions::from_mode(0o666),
         )
         .map_err(ioerr)?;
 
