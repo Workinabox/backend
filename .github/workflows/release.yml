@@ -64,6 +64,11 @@ jobs:
       image: rust:1.92-bookworm
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      # Pin a portable CPU baseline for the shipped binary. llama-cpp-sys keys ggml's CPU features
+      # (incl. AVX-512) off the build's target features; on a runner whose CPU has AVX-512 the
+      # binary picks up AVX-512 in non-runtime-guarded code and SIGILLs on hosts without it (the
+      # demo is AVX2-only). x86-64-v3 = AVX2+FMA+BMI2+F16C, supported by every target host here.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
       # Compiled into the binary so /health reports the release tag, not Cargo.toml.
       WIAB_VERSION: ${{ needs.create-release.outputs.version }}
     steps:
