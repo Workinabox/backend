@@ -131,7 +131,9 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
     let vm_runtime =
         if env_flag("WIAB_FIRECRACKER_ENABLED") && std::path::Path::new("/dev/kvm").exists() {
             info!("vm runtime: firecracker (/dev/kvm present)");
-            VmRuntimeDispatch::Firecracker(FirecrackerRuntime::new(FirecrackerConfig::from_env()))
+            VmRuntimeDispatch::Firecracker(Box::new(FirecrackerRuntime::new(
+                FirecrackerConfig::from_env(),
+            )))
         } else {
             info!("vm runtime: in-memory (firecracker disabled or /dev/kvm absent)");
             VmRuntimeDispatch::InMemory(InMemoryVmRuntime::new())

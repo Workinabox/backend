@@ -7,7 +7,9 @@ use crate::{FirecrackerRuntime, InMemoryVmRuntime};
 /// while the actual runtime is selected at startup (Firecracker on a KVM host, else in-memory).
 pub enum VmRuntimeDispatch {
     InMemory(InMemoryVmRuntime),
-    Firecracker(FirecrackerRuntime),
+    // Boxed so this variant (which owns the whole FirecrackerConfig) isn't far larger than the
+    // tiny InMemory one — clippy::large_enum_variant.
+    Firecracker(Box<FirecrackerRuntime>),
 }
 
 impl VmRuntime for VmRuntimeDispatch {
