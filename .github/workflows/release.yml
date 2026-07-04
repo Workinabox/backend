@@ -73,8 +73,6 @@ jobs:
       # -- which CI honored only intermittently (v0.1.12 shipped clean, v0.1.13 shipped native).
       # x86-64-v3 = AVX2+FMA+BMI2+F16C, supported by every target host here.
       CARGO_ENCODED_RUSTFLAGS: "-Ctarget-cpu=x86-64-v3"
-      # Make llama-cpp-sys log its resolved -march, so every release build proves its baseline in-log.
-      BUILD_DEBUG: "1"
       # Compiled into the binary so /health reports the release tag, not Cargo.toml.
       WIAB_VERSION: ${{ needs.create-release.outputs.version }}
     steps:
@@ -110,19 +108,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Self-classifying baseline check. llama-cpp-sys's build.rs turns target-cpu=native into
+          # GGML_NATIVE=ON (-march=native), which on an AVX-512 build runner bakes AVX-512 into
+          # unguarded code -> SIGILL on the AVX2-only demo host. We pin CARGO_ENCODED_RUSTFLAGS to
+          # x86-64-v3 so that can't happen; this step both proves it and refuses to ship if it did.
+          #
           # A GGML_NATIVE=OFF / -march=x86-64-v3 build carries only ggml's runtime-guarded AVX-512
-          # dispatch kernels (~a dozen GPR-source broadcasts); a native build on an AVX-512 runner
-          # sprays AVX-512 across hundreds of unguarded call sites (200+). The demo host is AVX2-only,
-          # so a native binary SIGILLs at model load. Fail the release rather than ship it.
+          # dispatch kernels (~18 GPR-source broadcasts); a native build on an AVX-512 runner sprays
+          # AVX-512 across hundreds of unguarded call sites (200+). The threshold cleanly separates them.
           threshold=50
+          echo "pinned CARGO_ENCODED_RUSTFLAGS=[${CARGO_ENCODED_RUSTFLAGS:-<unset>}]"
+          runner_avx512="$(grep -oE 'avx512[a-z]+' /proc/cpuinfo | sort -u | paste -sd, - || true)"
+          echo "build runner AVX-512 support: [${runner_avx512:-none}]"
+          fail=0
           for bin in target/release/wiab target/release/wiab-agent; do
             n=$(objdump -d "$bin" | grep -cE 'vpbroadcast[qd][[:space:]]+%r' || true)
             echo "$bin: AVX-512 GPR-broadcast count = $n (threshold $threshold)"
             if [ "$n" -gt "$threshold" ]; then
               echo "::error::$bin has native-style AVX-512 ($n > $threshold); refusing to ship a SIGILL-prone binary."
-              exit 1
+              fail=1
             fi
           done
+          [ "$fail" -eq 0 ] || exit 1
+          # Verdict: on an AVX-512 runner a clean binary *proves* the pin applied (native would be 200+);
+          # on a non-AVX-512 runner a clean binary is safe but doesn't by itself exercise the pin.
+          if [ -n "${runner_avx512:-}" ]; then
+            echo "VERDICT: runner HAS AVX-512 yet the binary is clean -> the x86-64-v3 pin is PROVEN to have applied."
+          else
+            echo "VERDICT: runner has NO AVX-512, so this build can't exercise the pin; the gate still guarantees the artifact is AVX-512-safe."
+          fi
 
       - name: Package binary
         shell: bash
