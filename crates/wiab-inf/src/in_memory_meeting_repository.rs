@@ -6,6 +6,7 @@ use std::{
 use wiab_core::meeting::{
     AgendaItem, Meeting, MeetingParticipant, MeetingRepository, MeetingRole, ParticipantKind,
 };
+use wiab_core::organization::OrganizationId;
 use wiab_core::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Default)]
@@ -148,6 +149,7 @@ fn seeded_meeting(
         .collect();
 
     let mut meeting = Meeting::new(
+        OrganizationId::from_number(1),
         title.to_owned(),
         owner.participant_id.clone(),
         moderator.participant_id.clone(),

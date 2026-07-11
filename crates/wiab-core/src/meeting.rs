@@ -5,6 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::meeting_traits::FloorRequestCandidate;
+use crate::organization::OrganizationId;
 use crate::repository::{RepoError, SaveError, Version};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +148,7 @@ pub struct MinutesDocument {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeetingSnapshot {
     pub meeting_id: String,
+    pub organization_id: String,
     pub title: String,
     pub state: MeetingState,
     pub owner_participant_id: String,
@@ -210,6 +212,7 @@ pub enum MeetingEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meeting {
     pub meeting_id: String,
+    pub organization_id: OrganizationId,
     pub title: String,
     pub state: MeetingState,
     pub owner_participant_id: String,
@@ -224,6 +227,7 @@ pub struct Meeting {
 
 impl Meeting {
     pub fn new(
+        organization_id: OrganizationId,
         title: String,
         owner_participant_id: String,
         moderator_participant_id: String,
@@ -288,6 +292,7 @@ impl Meeting {
 
         Ok(Self {
             meeting_id: Uuid::new_v4().to_string(),
+            organization_id,
             title,
             state: MeetingState::Active,
             owner_participant_id,
@@ -304,6 +309,7 @@ impl Meeting {
     pub fn snapshot(&self) -> MeetingSnapshot {
         MeetingSnapshot {
             meeting_id: self.meeting_id.clone(),
+            organization_id: self.organization_id.to_string(),
             title: self.title.clone(),
             state: self.state,
             owner_participant_id: self.owner_participant_id.clone(),
@@ -640,6 +646,7 @@ mod tests {
         let duplicate = agent_participant("agent-3", MeetingRole::Participant, "cto");
 
         let error = Meeting::new(
+            OrganizationId::from_number(1),
             "Leadership".to_owned(),
             owner.participant_id.clone(),
             moderator.participant_id.clone(),
@@ -706,6 +713,7 @@ mod tests {
         let moderator = agent_participant("agent-1", MeetingRole::Moderator, "Moderator");
 
         let error = Meeting::new(
+            OrganizationId::from_number(1),
             "   ".to_owned(),
             owner.participant_id.clone(),
             moderator.participant_id.clone(),
@@ -724,6 +732,7 @@ mod tests {
         let moderator = human_participant("mod-1", MeetingRole::Moderator, "Moderator");
 
         let error = Meeting::new(
+            OrganizationId::from_number(1),
             "Leadership".to_owned(),
             owner.participant_id.clone(),
             moderator.participant_id.clone(),
@@ -737,6 +746,7 @@ mod tests {
         let owner = human_participant("owner-2", MeetingRole::Owner, "Frederic");
         let moderator = human_participant("mod-2", MeetingRole::Moderator, "Moderator");
         let error = Meeting::new(
+            OrganizationId::from_number(1),
             "Leadership".to_owned(),
             owner.participant_id.clone(),
             moderator.participant_id.clone(),
@@ -760,6 +770,7 @@ mod tests {
 
         let snapshot = meeting.snapshot();
 
+        assert_eq!(snapshot.organization_id, "O-1");
         assert_eq!(snapshot.title, "Leadership");
         assert_eq!(snapshot.state, MeetingState::Ended);
         assert_eq!(snapshot.participants.len(), 4);
@@ -982,6 +993,7 @@ mod tests {
         let pm = agent_participant("agent-3", MeetingRole::Participant, "PM");
 
         Meeting::new(
+            OrganizationId::from_number(1),
             "Leadership".to_owned(),
             owner.participant_id.clone(),
             moderator.participant_id.clone(),

@@ -10,6 +10,7 @@ use wiab_core::{
         ParticipantKind,
     },
     meeting_traits::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
+    organization::OrganizationId,
     repository::{SaveError, Version},
 };
 
@@ -48,12 +49,17 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
         }
     }
 
-    pub async fn list_meetings(&self) -> anyhow::Result<Vec<MeetingSnapshot>> {
+    pub async fn list_meetings(
+        &self,
+        organization_id: &str,
+    ) -> anyhow::Result<Vec<MeetingSnapshot>> {
+        let organization_id: OrganizationId = organization_id.parse()?;
         let mut meetings = self
             .meeting_repository
             .list()
             .await?
             .into_iter()
+            .filter(|meeting| meeting.organization_id == organization_id)
             .map(|meeting| meeting.snapshot())
             .collect::<Vec<_>>();
         meetings.sort_by(|left, right| left.title.cmp(&right.title));
@@ -62,10 +68,12 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
 
     pub async fn create_meeting(
         &self,
+        organization_id: &str,
         request: CreateMeetingRequest,
     ) -> anyhow::Result<MeetingSnapshot> {
+        let organization_id: OrganizationId = organization_id.parse()?;
         let _guard = self.mutation_guard.lock().await;
-        let meeting = build_meeting_from_request(request, self.clock.as_ref())?;
+        let meeting = build_meeting_from_request(organization_id, request, self.clock.as_ref())?;
         let snapshot = meeting.snapshot();
         self.meeting_repository.save(meeting, Version::NEW).await?;
         Ok(snapshot)
@@ -293,6 +301,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
 }
 
 fn build_meeting_from_request(
+    organization_id: OrganizationId,
     request: CreateMeetingRequest,
     clock: &dyn Clock,
 ) -> anyhow::Result<Meeting> {
@@ -339,6 +348,7 @@ fn build_meeting_from_request(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let mut meeting = Meeting::new(
+        organization_id,
         title,
         owner.participant_id.clone(),
         moderator.participant_id.clone(),
@@ -603,18 +613,21 @@ mod tests {
             Arc::new(TestClock),
         );
         let meeting = service
-            .create_meeting(CreateMeetingRequest {
-                title: "Test".to_owned(),
-                owner: CreateMeetingParticipant::Human {
-                    name: "Frederic".to_owned(),
+            .create_meeting(
+                "O-1",
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner: CreateMeetingParticipant::Human {
+                        name: "Frederic".to_owned(),
+                    },
+                    invited_participants: vec![CreateMeetingParticipant::Agent {
+                        name: "CTO".to_owned(),
+                        instructions: "You are the CTO".to_owned(),
+                        voice_id: "alloy".to_owned(),
+                    }],
+                    agenda: vec!["review launch timeline".to_owned()],
                 },
-                invited_participants: vec![CreateMeetingParticipant::Agent {
-                    name: "CTO".to_owned(),
-                    instructions: "You are the CTO".to_owned(),
-                    voice_id: "alloy".to_owned(),
-                }],
-                agenda: vec!["review launch timeline".to_owned()],
-            })
+            )
             .await
             .expect("meeting should be created");
 
@@ -644,18 +657,21 @@ mod tests {
             Arc::new(TestClock),
         );
         let meeting = service
-            .create_meeting(CreateMeetingRequest {
-                title: "Test".to_owned(),
-                owner: CreateMeetingParticipant::Human {
-                    name: "Frederic".to_owned(),
+            .create_meeting(
+                "O-1",
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner: CreateMeetingParticipant::Human {
+                        name: "Frederic".to_owned(),
+                    },
+                    invited_participants: vec![CreateMeetingParticipant::Agent {
+                        name: "Angela".to_owned(),
+                        instructions: "You are Angela".to_owned(),
+                        voice_id: "alloy".to_owned(),
+                    }],
+                    agenda: vec!["review launch timeline".to_owned()],
                 },
-                invited_participants: vec![CreateMeetingParticipant::Agent {
-                    name: "Angela".to_owned(),
-                    instructions: "You are Angela".to_owned(),
-                    voice_id: "alloy".to_owned(),
-                }],
-                agenda: vec!["review launch timeline".to_owned()],
-            })
+            )
             .await
             .expect("meeting should be created");
 
@@ -678,16 +694,19 @@ mod tests {
             Arc::new(TestClock),
         );
         let meeting = service
-            .create_meeting(CreateMeetingRequest {
-                title: "Test".to_owned(),
-                owner: CreateMeetingParticipant::Human {
-                    name: "Frederic".to_owned(),
+            .create_meeting(
+                "O-1",
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner: CreateMeetingParticipant::Human {
+                        name: "Frederic".to_owned(),
+                    },
+                    invited_participants: vec![CreateMeetingParticipant::Human {
+                        name: "Alice".to_owned(),
+                    }],
+                    agenda: vec!["review".to_owned()],
                 },
-                invited_participants: vec![CreateMeetingParticipant::Human {
-                    name: "Alice".to_owned(),
-                }],
-                agenda: vec!["review".to_owned()],
-            })
+            )
             .await
             .expect("meeting should be created");
         let alice_id = meeting
@@ -717,18 +736,21 @@ mod tests {
             Arc::new(TestClock),
         );
         let meeting = service
-            .create_meeting(CreateMeetingRequest {
-                title: "Test".to_owned(),
-                owner: CreateMeetingParticipant::Human {
-                    name: "Frederic".to_owned(),
+            .create_meeting(
+                "O-1",
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner: CreateMeetingParticipant::Human {
+                        name: "Frederic".to_owned(),
+                    },
+                    invited_participants: vec![CreateMeetingParticipant::Agent {
+                        name: "CTO".to_owned(),
+                        instructions: "You are the CTO".to_owned(),
+                        voice_id: "alloy".to_owned(),
+                    }],
+                    agenda: vec!["review launch timeline".to_owned()],
                 },
-                invited_participants: vec![CreateMeetingParticipant::Agent {
-                    name: "CTO".to_owned(),
-                    instructions: "You are the CTO".to_owned(),
-                    voice_id: "alloy".to_owned(),
-                }],
-                agenda: vec!["review launch timeline".to_owned()],
-            })
+            )
             .await
             .expect("meeting should be created");
 
@@ -768,18 +790,21 @@ mod tests {
             Arc::new(TestClock),
         );
         let meeting = service
-            .create_meeting(CreateMeetingRequest {
-                title: "Test".to_owned(),
-                owner: CreateMeetingParticipant::Human {
-                    name: "Frederic".to_owned(),
+            .create_meeting(
+                "O-1",
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner: CreateMeetingParticipant::Human {
+                        name: "Frederic".to_owned(),
+                    },
+                    invited_participants: vec![CreateMeetingParticipant::Agent {
+                        name: "CTO".to_owned(),
+                        instructions: "You are the CTO".to_owned(),
+                        voice_id: "alloy".to_owned(),
+                    }],
+                    agenda: vec!["review launch timeline".to_owned()],
                 },
-                invited_participants: vec![CreateMeetingParticipant::Agent {
-                    name: "CTO".to_owned(),
-                    instructions: "You are the CTO".to_owned(),
-                    voice_id: "alloy".to_owned(),
-                }],
-                agenda: vec!["review launch timeline".to_owned()],
-            })
+            )
             .await
             .expect("meeting should be created");
 
@@ -814,18 +839,21 @@ mod tests {
             Arc::new(TestClock),
         );
         let meeting = service
-            .create_meeting(CreateMeetingRequest {
-                title: "Test".to_owned(),
-                owner: CreateMeetingParticipant::Human {
-                    name: "Frederic".to_owned(),
+            .create_meeting(
+                "O-1",
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner: CreateMeetingParticipant::Human {
+                        name: "Frederic".to_owned(),
+                    },
+                    invited_participants: vec![CreateMeetingParticipant::Agent {
+                        name: "CTO".to_owned(),
+                        instructions: "You are the CTO".to_owned(),
+                        voice_id: "alloy".to_owned(),
+                    }],
+                    agenda: vec!["review launch timeline".to_owned()],
                 },
-                invited_participants: vec![CreateMeetingParticipant::Agent {
-                    name: "CTO".to_owned(),
-                    instructions: "You are the CTO".to_owned(),
-                    voice_id: "alloy".to_owned(),
-                }],
-                agenda: vec!["review launch timeline".to_owned()],
-            })
+            )
             .await
             .expect("meeting should be created");
 

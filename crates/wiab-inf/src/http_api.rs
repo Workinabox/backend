@@ -34,7 +34,6 @@ use crate::{AppState, handle_signal_socket};
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/meetings", get(list_meetings).post(create_meeting))
         .route(
             "/organizations",
             get(list_organizations).post(create_organization),
@@ -50,6 +49,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/organizations/{organization_id}/agents",
             get(list_agents).post(create_agent),
+        )
+        .route(
+            "/organizations/{organization_id}/meetings",
+            get(list_meetings).post(create_meeting),
         )
         .route(
             "/projects/{project_id}",
@@ -150,6 +153,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/signal", get(signal))
         .layer(middleware::from_fn_with_state(state.clone(), csrf_guard))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_authentication,
+        ))
         .with_state(state)
 }
 
@@ -168,11 +175,12 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
 
 async fn list_meetings(
     State(state): State<AppState>,
+    Path(organization_id): Path<String>,
 ) -> Result<Json<Vec<MeetingSnapshot>>, (StatusCode, String)> {
     Ok(Json(
         state
             .meeting_service
-            .list_meetings()
+            .list_meetings(&organization_id)
             .await
             .map_err(bad_request)?,
     ))
@@ -180,14 +188,17 @@ async fn list_meetings(
 
 async fn create_meeting(
     State(state): State<AppState>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateMeetingRequest>,
-) -> Result<Json<MeetingSnapshot>, (axum::http::StatusCode, String)> {
+) -> Result<Json<MeetingSnapshot>, (StatusCode, String)> {
+    require_org_role(&state, &organization_id, Operation::Write, &headers).await?;
     state
         .meeting_service
-        .create_meeting(request)
+        .create_meeting(&organization_id, request)
         .await
         .map(Json)
-        .map_err(|err| (axum::http::StatusCode::BAD_REQUEST, err.to_string()))
+        .map_err(bad_request)
 }
 
 async fn list_organizations(
@@ -204,8 +215,11 @@ async fn list_organizations(
 
 async fn create_organization(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<CreateOrganizationRequest>,
 ) -> Result<Json<OrganizationSnapshot>, (StatusCode, String)> {
+    // A new org has no parent to authorize against; restrict creation to an existing Owner.
+    require_owner(&state, &headers).await?;
     state
         .organization_service
         .create_organization(request)
@@ -232,8 +246,10 @@ async fn get_organization(
 async fn update_organization(
     State(state): State<AppState>,
     Path(organization_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateOrganizationRequest>,
 ) -> Result<Json<OrganizationSnapshot>, (StatusCode, String)> {
+    require_org_role(&state, &organization_id, Operation::Write, &headers).await?;
     match state
         .organization_service
         .update_organization(&organization_id, request)
@@ -263,8 +279,10 @@ async fn list_projects(
 async fn create_project(
     State(state): State<AppState>,
     Path(organization_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectSnapshot>, (StatusCode, String)> {
+    require_org_role(&state, &organization_id, Operation::Write, &headers).await?;
     match state
         .project_service
         .create_project(&organization_id, request)
@@ -294,8 +312,10 @@ async fn get_project(
 async fn update_project(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Json<ProjectSnapshot>, (StatusCode, String)> {
+    require_project_org_role(&state, &project_id, Operation::Write, &headers).await?;
     match state
         .project_service
         .update_project(&project_id, request)
@@ -325,8 +345,12 @@ async fn list_agents(
 async fn create_agent(
     State(state): State<AppState>,
     Path(organization_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
+    // Creating an agent provisions a privileged identity (Write on the org) and can boot a VM,
+    // so require org-Administer, not merely Write.
+    require_org_role(&state, &organization_id, Operation::Administer, &headers).await?;
     let snapshot = match state
         .agent_service
         .create_agent(&organization_id, request)
@@ -374,8 +398,10 @@ async fn get_agent(
 async fn update_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateAgentRequest>,
 ) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
+    require_agent_org_role(&state, &agent_id, Operation::Administer, &headers).await?;
     match state
         .agent_service
         .update_agent(&agent_id, request)
@@ -390,7 +416,9 @@ async fn update_agent(
 async fn activate_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
+    require_agent_org_role(&state, &agent_id, Operation::Administer, &headers).await?;
     match state
         .agent_service
         .activate_agent(&agent_id)
@@ -405,7 +433,9 @@ async fn activate_agent(
 async fn deactivate_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<AgentSnapshot>, (StatusCode, String)> {
+    require_agent_org_role(&state, &agent_id, Operation::Administer, &headers).await?;
     match state
         .agent_service
         .deactivate_agent(&agent_id)
@@ -435,8 +465,10 @@ async fn list_boards(
 async fn create_board(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateBoardRequest>,
 ) -> Result<Json<BoardSnapshot>, (StatusCode, String)> {
+    require_project_org_role(&state, &project_id, Operation::Write, &headers).await?;
     match state
         .board_service
         .create_board(&project_id, request)
@@ -466,8 +498,18 @@ async fn get_board(
 async fn update_board(
     State(state): State<AppState>,
     Path(board_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateBoardRequest>,
 ) -> Result<Json<BoardSnapshot>, (StatusCode, String)> {
+    let Some(board) = state
+        .board_service
+        .board_snapshot(&board_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("board", &board_id));
+    };
+    require_project_org_role(&state, &board.project_id, Operation::Write, &headers).await?;
     match state
         .board_service
         .update_board(&board_id, request)
@@ -538,8 +580,10 @@ async fn get_repo(
 async fn update_repo(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateRepoRequest>,
 ) -> Result<Json<RepoSnapshot>, (StatusCode, String)> {
+    require_repo_role(&state, &repo_id, Operation::Write, &headers).await?;
     match state
         .repo_service
         .update_repo(&repo_id, request)
@@ -665,7 +709,7 @@ pub(crate) fn basic_auth_password(headers: &HeaderMap) -> Option<String> {
     decoded.split_once(':').map(|(_, pass)| pass.to_owned())
 }
 
-/// The request's access token, from `Authorization: Bearer <token>` (console) or the
+/// The request's access token, from `Authorization: Bearer <token>` (frontend) or the
 /// password field of HTTP Basic (git).
 fn request_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
@@ -790,9 +834,39 @@ async fn csrf_guard(
     Ok(next.run(request).await)
 }
 
+/// Routes reachable without an authenticated identity; every other route is gated by
+/// `require_authentication` (fail closed). Kept deliberately small:
+/// - `/health` — liveness probe.
+/// - `/auth/*` — identity-establishing/inspecting endpoints (login, session, logout, config,
+///   OIDC, signup, reset, invite, verify); the caller has no identity yet when hitting these.
+/// - the git Smart-HTTP endpoints (`.../info/refs`, `.../git-upload-pack`,
+///   `.../git-receive-pack`) — they self-authenticate in `authorize_git` (public repos allow
+///   anonymous read, private repos require a Basic token), so the gate must not pre-empt them.
+fn is_public_route(path: &str) -> bool {
+    path == "/health"
+        || path.starts_with("/auth/")
+        || path.ends_with("/info/refs")
+        || path.ends_with("/git-upload-pack")
+        || path.ends_with("/git-receive-pack")
+}
+
+/// Fail-closed authentication gate. Sibling to `csrf_guard`: every request must resolve to an
+/// identity except the `is_public_route` allow-list. This is the backstop that makes an unguarded
+/// handler unreachable rather than open; per-resource authorization still happens in the handlers.
+async fn require_authentication(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    if !is_public_route(request.uri().path()) {
+        authenticate(&state, request.headers()).await?;
+    }
+    Ok(next.run(request).await)
+}
+
 /// Resolves the request to a user and its scope, or 401.
 ///
-/// Precedence: a Bearer/Basic token first (console PATs, git, agents) — an explicit,
+/// Precedence: a Bearer/Basic token first (frontend PATs, git, agents) — an explicit,
 /// scoped, CSRF-immune credential that machine clients always send. Otherwise a browser
 /// session cookie, which carries the user's full authority (unrestricted scope, like SSH
 /// key auth). Git and machine paths never reach the cookie branch, so they are unchanged.
@@ -871,6 +945,64 @@ async fn require_repo_role(
         .await
         .map_err(internal)?;
     if allowed { Ok(()) } else { Err(forbidden()) }
+}
+
+/// Requires the caller hold `operation` on the org that owns a project. 404 if the project is
+/// unknown. Used by the project-scoped mutations (works, boards, pipelines) that address a
+/// project directly.
+async fn require_project_org_role(
+    state: &AppState,
+    project_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(project) = state
+        .project_service
+        .project_snapshot(project_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("project", project_id));
+    };
+    require_org_role(state, &project.organization_id, operation, headers).await
+}
+
+/// Requires the caller hold `operation` on the org that owns an agent. 404 if the agent is
+/// unknown. Used by the agent update/activate/deactivate handlers, which address an agent by id.
+async fn require_agent_org_role(
+    state: &AppState,
+    agent_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(agent) = state
+        .agent_service
+        .agent_snapshot(agent_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("agent", agent_id));
+    };
+    require_org_role(state, &agent.organization_id, operation, headers).await
+}
+
+/// Requires the caller hold `operation` on the org that owns a work (via its project). 404 if the
+/// work is unknown. Used by the work update and done handlers, which address a work by id.
+async fn require_work_org_role(
+    state: &AppState,
+    work_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(work) = state
+        .work_service
+        .work_snapshot(work_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("work", work_id));
+    };
+    require_project_org_role(state, &work.project_id, operation, headers).await
 }
 
 fn unauthorized() -> (StatusCode, String) {
@@ -1120,7 +1252,7 @@ async fn auth_config(State(state): State<AppState>) -> Json<AuthConfigResponse> 
 }
 
 /// Only same-origin relative paths are accepted as a post-login destination (no open
-/// redirect); anything else falls back to the console home.
+/// redirect); anything else falls back to the frontend home.
 fn sanitize_return_to(next: Option<&str>) -> String {
     match next {
         Some(value) if value.starts_with('/') && !value.starts_with("//") => value.to_owned(),
@@ -1593,8 +1725,10 @@ async fn list_pipelines(
 async fn create_pipeline(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreatePipelineRequest>,
 ) -> Result<Json<PipelineSnapshot>, (StatusCode, String)> {
+    require_project_org_role(&state, &project_id, Operation::Write, &headers).await?;
     match state
         .pipeline_service
         .create_pipeline(&project_id, request)
@@ -1624,8 +1758,18 @@ async fn get_pipeline(
 async fn update_pipeline(
     State(state): State<AppState>,
     Path(pipeline_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdatePipelineRequest>,
 ) -> Result<Json<PipelineSnapshot>, (StatusCode, String)> {
+    let Some(pipeline) = state
+        .pipeline_service
+        .pipeline_snapshot(&pipeline_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("pipeline", &pipeline_id));
+    };
+    require_project_org_role(&state, &pipeline.project_id, Operation::Write, &headers).await?;
     match state
         .pipeline_service
         .update_pipeline(&pipeline_id, request)
@@ -1655,8 +1799,10 @@ async fn list_project_works(
 async fn create_work(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateWorkRequest>,
 ) -> Result<Json<WorkSnapshot>, (StatusCode, String)> {
+    require_project_org_role(&state, &project_id, Operation::Write, &headers).await?;
     match state
         .work_service
         .create_work(&project_id, request)
@@ -1686,8 +1832,10 @@ async fn get_work(
 async fn update_work(
     State(state): State<AppState>,
     Path(work_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateWorkRequest>,
 ) -> Result<Json<WorkSnapshot>, (StatusCode, String)> {
+    require_work_org_role(&state, &work_id, Operation::Write, &headers).await?;
     match state
         .work_service
         .update_work(&work_id, request)
@@ -1702,8 +1850,10 @@ async fn update_work(
 async fn add_done(
     State(state): State<AppState>,
     Path(work_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<AddDoneRequest>,
 ) -> Result<Json<WorkSnapshot>, (StatusCode, String)> {
+    require_work_org_role(&state, &work_id, Operation::Write, &headers).await?;
     state
         .work_service
         .add_done(&work_id, request)
@@ -1715,7 +1865,9 @@ async fn add_done(
 async fn fulfill_done(
     State(state): State<AppState>,
     Path((work_id, done_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<WorkSnapshot>, (StatusCode, String)> {
+    require_work_org_role(&state, &work_id, Operation::Write, &headers).await?;
     state
         .work_service
         .fulfill_done(&work_id, &done_id)
@@ -1727,7 +1879,9 @@ async fn fulfill_done(
 async fn unfulfill_done(
     State(state): State<AppState>,
     Path((work_id, done_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<WorkSnapshot>, (StatusCode, String)> {
+    require_work_org_role(&state, &work_id, Operation::Write, &headers).await?;
     state
         .work_service
         .unfulfill_done(&work_id, &done_id)
@@ -1771,5 +1925,34 @@ mod tests {
         assert!(!csrf_exempt(&Method::POST, "/users"));
         // The exemption is POST-only.
         assert!(!csrf_exempt(&Method::GET, "/auth/session"));
+    }
+
+    #[test]
+    fn public_routes_are_only_health_auth_and_git_smart_http() {
+        // Reachable without authentication: liveness, the identity endpoints, and the git
+        // Smart-HTTP routes (which self-authenticate in `authorize_git`).
+        for path in [
+            "/health",
+            "/auth/session",
+            "/auth/config",
+            "/auth/oidc/google/callback",
+            "/repos/R-1.git/info/refs",
+            "/repos/R-1.git/git-upload-pack",
+            "/repos/R-1.git/git-receive-pack",
+        ] {
+            assert!(is_public_route(path), "{path} should be public");
+        }
+        // Everything else is gated — state-changing and read endpoints alike.
+        for path in [
+            "/organizations",
+            "/organizations/O-1/meetings",
+            "/organizations/O-1/agents",
+            "/repos/R-1",
+            "/repos/R-1/branches",
+            "/repos/R-1/branches/main/files/raw",
+            "/works/W-1",
+        ] {
+            assert!(!is_public_route(path), "{path} should be gated");
+        }
     }
 }
