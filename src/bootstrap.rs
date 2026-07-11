@@ -666,8 +666,9 @@ async fn seed_sso_owner(
 async fn log_loaded_meetings(
     meeting_service: &MeetingApplicationService<InMemoryMeetingRepository>,
 ) {
+    // Seeded meetings live in the bootstrap org O-1 (see `InMemoryMeetingRepository` seed data).
     let meetings = meeting_service
-        .list_meetings()
+        .list_meetings("O-1")
         .await
         .expect("failed to list seeded meetings");
     info!("loaded {} meetings from startup data", meetings.len());

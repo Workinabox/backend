@@ -383,6 +383,7 @@ fn default_threads() -> i32 {
 mod tests {
     use super::*;
     use wiab_core::meeting::{AgendaItem, MeetingRole, MeetingState, ParticipantKind};
+    use wiab_core::organization::OrganizationId;
 
     #[test]
     fn extracts_json_object_from_wrapped_output() {
@@ -394,6 +395,7 @@ mod tests {
     fn parses_minutes_agenda_and_preserves_ids() {
         let meeting = Meeting {
             meeting_id: "meeting-1".to_owned(),
+            organization_id: OrganizationId::from_number(1),
             title: "Test".to_owned(),
             state: MeetingState::Ended,
             owner_participant_id: "owner".to_owned(),
