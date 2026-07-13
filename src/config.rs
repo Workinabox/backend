@@ -9,7 +9,7 @@
 //! (Firecracker, Docker, Llama, Whisper, media) live in that crate next to their components; the
 //! groups consumed here in the binary (serve, auth, email, dev-seeding) live in this module.
 
-use wiab_inf::{DockerConfig, FirecrackerConfig};
+use wiab_inf::{DockerConfig, FirecrackerConfig, LlamaConfig};
 
 use crate::Cli;
 
@@ -20,6 +20,7 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     pub email: EmailConfig,
     pub dev: DevConfig,
+    pub meeting: MeetingConfig,
 }
 
 /// Process/serving config: persistence selection, the addresses we bind, and TLS material.
@@ -82,6 +83,13 @@ pub struct DevConfig {
     pub sso_owner_email: String,
     pub sso_owner_name: String,
     pub sso_owner_password: Option<String>,
+}
+
+/// Meeting-intelligence config. `llama` is `Some` only when `WIAB_LLAMA_ENABLED` is set, in
+/// which case its model config is resolved and validated here; the model itself is loaded later
+/// in `build_app_state`.
+pub struct MeetingConfig {
+    pub llama: Option<LlamaConfig>,
 }
 
 impl AppConfig {
@@ -150,6 +158,13 @@ impl AppConfig {
                         .ok()
                         .filter(|p| !p.is_empty()),
                 }
+            },
+            meeting: MeetingConfig {
+                llama: if env_flag("WIAB_LLAMA_ENABLED") {
+                    Some(LlamaConfig::from_env()?)
+                } else {
+                    None
+                },
             },
         })
     }

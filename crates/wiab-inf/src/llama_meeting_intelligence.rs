@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::thread;
 
 use anyhow::{Context, anyhow, bail};
@@ -22,18 +23,21 @@ pub struct LlamaMeetingIntelligence {
     max_minutes_tokens: usize,
 }
 
-#[derive(Deserialize)]
-struct GeneratedMinutesEnvelope {
-    agenda: Vec<GeneratedMinutesAgendaItem>,
+/// Resolved + validated llama configuration. Built once at startup from the environment
+/// (`LlamaConfig::from_env`); the heavy model load happens later in `LlamaMeetingIntelligence::new`.
+#[derive(Clone, Debug)]
+pub struct LlamaConfig {
+    pub model_path: PathBuf,
+    pub context_tokens: u32,
+    pub max_reply_tokens: usize,
+    pub max_minutes_tokens: usize,
+    pub threads: i32,
+    pub n_gpu_layers: u32,
+    pub chat_template_name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct GeneratedMinutesAgendaItem {
-    phrase: String,
-    decisions: Vec<String>,
-}
-
-impl LlamaMeetingIntelligence {
+impl LlamaConfig {
+    /// Read the llama model config from the environment, resolve the model file, and validate.
     pub fn from_env() -> anyhow::Result<Self> {
         let model_file = required_env("WIAB_LLAMA_MODEL_FILE")?;
         let model_path = resolve_model_file(&model_file)?;
@@ -63,13 +67,41 @@ impl LlamaMeetingIntelligence {
             bail!("WIAB_LLAMA_THREADS must be greater than zero");
         }
 
-        let runtime = LlamaRuntime::new(LlamaRuntimeConfig {
+        Ok(Self {
             model_path,
             context_tokens,
+            max_reply_tokens,
+            max_minutes_tokens,
             threads,
             n_gpu_layers,
             chat_template_name,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct GeneratedMinutesEnvelope {
+    agenda: Vec<GeneratedMinutesAgendaItem>,
+}
+
+#[derive(Deserialize)]
+struct GeneratedMinutesAgendaItem {
+    phrase: String,
+    decisions: Vec<String>,
+}
+
+impl LlamaMeetingIntelligence {
+    /// Load the llama model from an already-resolved [`LlamaConfig`] (the heavy step).
+    pub fn new(config: &LlamaConfig) -> anyhow::Result<Self> {
+        let runtime = LlamaRuntime::new(LlamaRuntimeConfig {
+            model_path: config.model_path.clone(),
+            context_tokens: config.context_tokens,
+            threads: config.threads,
+            n_gpu_layers: config.n_gpu_layers,
+            chat_template_name: config.chat_template_name.clone(),
         })?;
+        let max_reply_tokens = config.max_reply_tokens;
+        let max_minutes_tokens = config.max_minutes_tokens;
 
         Ok(Self {
             runtime,

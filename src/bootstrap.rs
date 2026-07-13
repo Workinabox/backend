@@ -60,7 +60,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
     let database_url = &config.serve.database_url;
     let seed_clock = SystemClock;
     let meeting_repository = InMemoryMeetingRepository::with_seed_data(|| seed_clock.now_rfc3339());
-    let intelligence = load_meeting_intelligence()?;
+    let intelligence = load_meeting_intelligence(&config.meeting)?;
     let meeting_service = Arc::new(MeetingApplicationService::new(
         meeting_repository.clone(),
         intelligence,
@@ -511,18 +511,6 @@ fn next_after<T>(items: &[T], number: impl Fn(&T) -> u64) -> u64 {
     items.iter().map(number).max().unwrap_or(0)
 }
 
-/// Reads a boolean env flag (`1`/`true`/`yes`/`on` = true), defaulting to false when unset.
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
 async fn seed_default_organization(
     organization_service: &OrganizationApplicationService<OrganizationRepo>,
     project_service: &ProjectApplicationService<ProjectRepo, OrganizationRepo>,
@@ -679,13 +667,15 @@ fn spawn_transcript_runtime(
     });
 }
 
-fn load_meeting_intelligence() -> anyhow::Result<Option<Arc<dyn MeetingIntelligence>>> {
-    if !env_flag("WIAB_LLAMA_ENABLED") {
+fn load_meeting_intelligence(
+    meeting: &crate::config::MeetingConfig,
+) -> anyhow::Result<Option<Arc<dyn MeetingIntelligence>>> {
+    let Some(llama) = &meeting.llama else {
         info!("meeting intelligence disabled (WIAB_LLAMA_ENABLED off)");
         return Ok(None);
-    }
+    };
 
-    let intelligence = LlamaMeetingIntelligence::from_env()
+    let intelligence = LlamaMeetingIntelligence::new(llama)
         .context("failed to initialize llama meeting intelligence")?;
     info!("meeting intelligence adapter: llama (eager-loaded)");
     Ok(Some(Arc::new(intelligence)))

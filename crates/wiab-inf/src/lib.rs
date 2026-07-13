@@ -84,7 +84,7 @@ pub use in_memory_vm_numbering::InMemoryVmNumbering;
 pub use in_memory_vm_repository::InMemoryVmRepository;
 pub use in_memory_work_numbering::InMemoryWorkNumbering;
 pub use in_memory_work_repository::InMemoryWorkRepository;
-pub use llama_meeting_intelligence::LlamaMeetingIntelligence;
+pub use llama_meeting_intelligence::{LlamaConfig, LlamaMeetingIntelligence};
 pub use postgres_agent_repository::PostgresAgentRepository;
 pub use postgres_board_repository::PostgresBoardRepository;
 pub use postgres_organization_repository::PostgresOrganizationRepository;
