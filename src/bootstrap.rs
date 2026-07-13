@@ -474,7 +474,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
 
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<FinalizedTranscript>();
     let sfu = Arc::new(
-        Sfu::new(meeting_service.clone(), transcript_tx)
+        Sfu::new(meeting_service.clone(), &config.media, transcript_tx)
             .await
             .context("failed to initialize SFU")?,
     );

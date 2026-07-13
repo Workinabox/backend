@@ -30,26 +30,49 @@ pub struct LocalTranscriber {
     tx: Sender<TranscriptJob>,
 }
 
-impl LocalTranscriber {
-    pub fn from_env(
-        transcript_tx: UnboundedSender<FinalizedTranscript>,
-    ) -> anyhow::Result<Option<Arc<Self>>> {
+/// Resolved whisper/STT config. Built once at startup (`WhisperConfig::from_env` — `Some` only
+/// when `WIAB_WHISPER_ENABLED`); the model itself is loaded later in `LocalTranscriber::new`.
+#[derive(Clone, Debug)]
+pub struct WhisperConfig {
+    pub model_path: String,
+    pub language: Option<String>,
+    pub threads: i32,
+}
+
+impl WhisperConfig {
+    /// Read + resolve the whisper config, returning `None` when transcription is disabled.
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
         if !env_flag("WIAB_WHISPER_ENABLED") {
-            info!("transcription disabled: WIAB_WHISPER_ENABLED is off");
             return Ok(None);
         }
-
         let model_file = required_env("WIAB_WHISPER_MODEL_FILE")?;
         let model_path = resolve_model_file(&model_file)?
             .to_string_lossy()
             .into_owned();
-
         let language = std::env::var("WIAB_STT_LANGUAGE").ok();
         let threads = std::env::var("WIAB_STT_THREADS")
             .ok()
             .and_then(|raw| raw.parse::<i32>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(4);
+        Ok(Some(Self {
+            model_path,
+            language,
+            threads,
+        }))
+    }
+}
+
+impl LocalTranscriber {
+    /// Spawn the whisper worker from an already-resolved [`WhisperConfig`] and block until the
+    /// model loads, so an enabled-but-broken model hard-fails startup (mirrors LlamaRuntime::new).
+    pub fn new(
+        config: &WhisperConfig,
+        transcript_tx: UnboundedSender<FinalizedTranscript>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let model_path = config.model_path.clone();
+        let language = config.language.clone();
+        let threads = config.threads;
 
         let (tx, rx) = mpsc::channel::<TranscriptJob>();
         let (startup_tx, startup_rx) = mpsc::channel();
@@ -67,14 +90,12 @@ impl LocalTranscriber {
             })
             .context("failed to spawn transcription worker thread")?;
 
-        // Block until the worker reports the model loaded, so an enabled-but-broken model
-        // hard-fails startup just like llama (mirrors LlamaRuntime::new).
         startup_rx
             .recv()
             .context("transcription worker thread exited before initialization completed")??;
 
         info!("transcription enabled with local whisper model");
-        Ok(Some(Arc::new(Self { tx })))
+        Ok(Arc::new(Self { tx }))
     }
 
     fn submit(&self, job: TranscriptJob) {

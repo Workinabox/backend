@@ -99,8 +99,9 @@ pub use repository_dispatch::{
     AgentRepo, BoardRepo, OrganizationRepo, PipelineRepo, ProjectRepo, RepoRepo,
     RoleAssignmentRepo, UserRepo, VmRepo, WorkRepo,
 };
-pub use sfu::{Sfu, handle_signal_socket};
+pub use sfu::{MediaConfig, Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;
 pub use system_clock::SystemClock;
+pub use transcription::WhisperConfig;
 pub use vm_runtime_dispatch::VmRuntimeDispatch;
 pub use wiab_user_directory::WiabUserDirectory;

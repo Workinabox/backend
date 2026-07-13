@@ -9,7 +9,7 @@
 //! (Firecracker, Docker, Llama, Whisper, media) live in that crate next to their components; the
 //! groups consumed here in the binary (serve, auth, email, dev-seeding) live in this module.
 
-use wiab_inf::{DockerConfig, FirecrackerConfig, LlamaConfig};
+use wiab_inf::{DockerConfig, FirecrackerConfig, LlamaConfig, MediaConfig};
 
 use crate::Cli;
 
@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub email: EmailConfig,
     pub dev: DevConfig,
     pub meeting: MeetingConfig,
+    pub media: MediaConfig,
 }
 
 /// Process/serving config: persistence selection, the addresses we bind, and TLS material.
@@ -166,6 +167,7 @@ impl AppConfig {
                     None
                 },
             },
+            media: MediaConfig::from_env()?,
         })
     }
 }

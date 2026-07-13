@@ -30,7 +30,7 @@ use wiab_core::{
 use crate::{
     agent_audio_transport::AgentAudioSource,
     in_memory_meeting_repository::InMemoryMeetingRepository,
-    transcription::{LocalTranscriber, TrackAudioTranscriber},
+    transcription::{LocalTranscriber, TrackAudioTranscriber, WhisperConfig},
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -193,9 +193,37 @@ pub struct Sfu {
 const PRODUCER_STATS_LOG_INTERVAL_SECONDS: u64 = 5;
 const AGENT_AUDIO_CONSUMER_ATTACH_GRACE_MS: u64 = 250;
 
+/// Media/SFU config: mediasoup networking plus optional whisper transcription. Resolved once at
+/// startup (`MediaConfig::from_env`); `Sfu::new` consumes it instead of reading the environment.
+#[derive(Clone, Debug)]
+pub struct MediaConfig {
+    pub listen_ip: IpAddr,
+    pub announced_address: Option<String>,
+    pub whisper: Option<WhisperConfig>,
+}
+
+impl MediaConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let listen_ip = std::env::var("WIAB_MEDIASOUP_LISTEN_IP")
+            .ok()
+            .and_then(|raw| raw.parse::<IpAddr>().ok())
+            .unwrap_or_else(|| "0.0.0.0".parse().expect("hardcoded listen IP is valid"));
+        let announced_address = std::env::var("WIAB_MEDIASOUP_ANNOUNCED_ADDRESS")
+            .ok()
+            .or_else(|| Some("10.0.2.2".to_owned()));
+        let whisper = WhisperConfig::from_env()?;
+        Ok(Self {
+            listen_ip,
+            announced_address,
+            whisper,
+        })
+    }
+}
+
 impl Sfu {
     pub async fn new(
         meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
+        media: &MediaConfig,
         transcript_tx: mpsc::UnboundedSender<FinalizedTranscript>,
     ) -> anyhow::Result<Self> {
         let worker_manager = WorkerManager::new();
@@ -211,16 +239,19 @@ impl Sfu {
             .create_direct_transport(DirectTransportOptions::default())
             .await
             .context("failed to create mediasoup direct transport")?;
-        let transcriber = LocalTranscriber::from_env(transcript_tx)
-            .context("failed to initialize local whisper transcriber")?;
+        let transcriber = match &media.whisper {
+            Some(whisper) => Some(
+                LocalTranscriber::new(whisper, transcript_tx)
+                    .context("failed to initialize local whisper transcriber")?,
+            ),
+            None => {
+                info!("transcription disabled: WIAB_WHISPER_ENABLED is off");
+                None
+            }
+        };
 
-        let listen_ip = std::env::var("WIAB_MEDIASOUP_LISTEN_IP")
-            .ok()
-            .and_then(|raw| raw.parse::<IpAddr>().ok())
-            .unwrap_or_else(|| "0.0.0.0".parse().expect("hardcoded listen IP is valid"));
-        let announced_address = std::env::var("WIAB_MEDIASOUP_ANNOUNCED_ADDRESS")
-            .ok()
-            .or_else(|| Some("10.0.2.2".to_owned()));
+        let listen_ip = media.listen_ip;
+        let announced_address = media.announced_address.clone();
 
         info!(
             "initialized mediasoup router (listen_ip={}, announced_address={})",
