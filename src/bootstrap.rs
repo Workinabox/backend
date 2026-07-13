@@ -38,14 +38,14 @@ use wiab_core::{
     work::WorkRepository,
 };
 use wiab_inf::{
-    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, FirecrackerConfig,
-    FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering, InMemoryAgentRepository,
-    InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
-    InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
-    InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
-    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
-    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
-    InMemoryVmNumbering, InMemoryVmRepository, InMemoryVmRuntime, InMemoryWorkNumbering,
+    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, DockerConfig,
+    DockerRuntime, FirecrackerConfig, FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering,
+    InMemoryAgentRepository, InMemoryBoardNumbering, InMemoryBoardRepository,
+    InMemoryMeetingRepository, InMemoryOrganizationNumbering, InMemoryOrganizationRepository,
+    InMemoryPipelineNumbering, InMemoryPipelineRepository, InMemoryProjectNumbering,
+    InMemoryProjectRepository, InMemoryRepoNumbering, InMemoryRepoRepository,
+    InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository, InMemoryUserNumbering,
+    InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering,
     InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo,
     PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
     PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
@@ -121,7 +121,8 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
     ));
 
     // VM service. The runtime is Firecracker only when enabled AND /dev/kvm is present (the demo
-    // host); otherwise in-memory, so the backend runs on a Mac / CI / non-KVM host unchanged.
+    // host); otherwise Docker, so the backend runs agents in containers on a Mac / CI / non-KVM
+    // host (and in prod for operators who accept the weaker shared-kernel boundary).
     let vm_repo = match &pool {
         Some(pool) => VmRepo::Postgres(PostgresVmRepository::new(pool.clone())),
         None => VmRepo::InMemory(InMemoryVmRepository::new()),
@@ -135,8 +136,8 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
                 FirecrackerConfig::from_env(),
             )))
         } else {
-            info!("vm runtime: in-memory (firecracker disabled or /dev/kvm absent)");
-            VmRuntimeDispatch::InMemory(InMemoryVmRuntime::new())
+            info!("vm runtime: docker (firecracker disabled or /dev/kvm absent)");
+            VmRuntimeDispatch::Docker(DockerRuntime::new(DockerConfig::from_env()).await?)
         };
     let vm_service = VmApplicationService::new(
         vm_repo,

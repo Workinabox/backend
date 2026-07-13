@@ -8,7 +8,7 @@
 //! the IaC installs.
 //!
 //! This runs only on a Linux host with `/dev/kvm`; elsewhere the bootstrap selects
-//! `InMemoryVmRuntime`. It shells out and cannot be exercised without KVM, so it is verified on
+//! `DockerRuntime`. It shells out and cannot be exercised without KVM, so it is verified on
 //! the demo VM, not in local/CI builds.
 
 use std::os::unix::fs::PermissionsExt;
