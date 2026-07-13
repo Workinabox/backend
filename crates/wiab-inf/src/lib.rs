@@ -1,6 +1,7 @@
 pub mod agent_audio_transport;
 pub mod app_state;
 pub mod credential_crypto;
+pub mod docker_runtime;
 pub mod firecracker_runtime;
 pub mod git2_backend;
 pub mod git_http;
@@ -26,7 +27,6 @@ pub mod in_memory_user_numbering;
 pub mod in_memory_user_repository;
 pub mod in_memory_vm_numbering;
 pub mod in_memory_vm_repository;
-pub mod in_memory_vm_runtime;
 pub mod in_memory_work_numbering;
 pub mod in_memory_work_repository;
 pub mod llama_meeting_intelligence;
@@ -57,6 +57,7 @@ pub use app_state::{
     WiabPasswordResetService,
 };
 pub use credential_crypto::{RandomTokenFactory, Sha256KeyFingerprinter, Sha256TokenHasher};
+pub use docker_runtime::{DockerConfig, DockerRuntime};
 pub use firecracker_runtime::{FirecrackerConfig, FirecrackerRuntime};
 pub use git_ssh::spawn_git_ssh_server;
 pub use git2_backend::Git2Backend;
@@ -81,7 +82,6 @@ pub use in_memory_user_numbering::InMemoryUserNumbering;
 pub use in_memory_user_repository::InMemoryUserRepository;
 pub use in_memory_vm_numbering::InMemoryVmNumbering;
 pub use in_memory_vm_repository::InMemoryVmRepository;
-pub use in_memory_vm_runtime::InMemoryVmRuntime;
 pub use in_memory_work_numbering::InMemoryWorkNumbering;
 pub use in_memory_work_repository::InMemoryWorkRepository;
 pub use llama_meeting_intelligence::LlamaMeetingIntelligence;
