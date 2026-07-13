@@ -17,6 +17,9 @@ use crate::Cli;
 pub struct AppConfig {
     pub serve: ServeConfig,
     pub vm: VmConfig,
+    pub auth: AuthConfig,
+    pub email: EmailConfig,
+    pub dev: DevConfig,
 }
 
 /// Process/serving config: persistence selection, the addresses we bind, and TLS material.
@@ -45,6 +48,42 @@ pub struct VmConfig {
     pub docker: DockerConfig,
 }
 
+/// HTTP auth + inbound SSO/OIDC federation. Client secrets default to empty (the feature is
+/// off unless its `*_ENABLED` flag is set), matching the previous inline behavior.
+pub struct AuthConfig {
+    /// Public base URL (`WIAB_BASE_URL`); drives cookie `Secure` and OIDC redirect URIs.
+    pub base_url: String,
+    pub local_signup: bool,
+    pub google_enabled: bool,
+    pub oidc_enabled: bool,
+    pub google_client_id: String,
+    pub google_client_secret: String,
+    pub oidc_issuer: String,
+    pub oidc_client_id: String,
+    pub oidc_client_secret: String,
+}
+
+/// Transactional email delivery. Missing credentials fall back to logging (handled in bootstrap).
+pub struct EmailConfig {
+    pub from: String,
+    /// `resend` (default) or `smtp`.
+    pub provider: String,
+    pub resend_api_key: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: u16,
+    pub smtp_user: Option<String>,
+    pub smtp_password: Option<String>,
+    pub smtp_tls: bool,
+}
+
+/// Dev-only seeding conveniences (owner password + optional pre-provisioned SSO owner).
+pub struct DevConfig {
+    pub owner_password: String,
+    pub sso_owner_email: String,
+    pub sso_owner_name: String,
+    pub sso_owner_password: Option<String>,
+}
+
 impl AppConfig {
     /// Resolve the full configuration from the parsed CLI plus the environment. Reads only —
     /// heavy work (DB connect, model loading) stays in `build_app_state`.
@@ -63,6 +102,54 @@ impl AppConfig {
                 firecracker_enabled: env_flag("WIAB_FIRECRACKER_ENABLED"),
                 firecracker: FirecrackerConfig::from_env(),
                 docker: DockerConfig::from_env(),
+            },
+            auth: AuthConfig {
+                base_url: env_or("WIAB_BASE_URL", "http://localhost:3000"),
+                local_signup: env_flag("WIAB_AUTH_LOCAL_SIGNUP"),
+                google_enabled: env_flag("WIAB_AUTH_GOOGLE_ENABLED"),
+                oidc_enabled: env_flag("WIAB_AUTH_OIDC_ENABLED"),
+                google_client_id: std::env::var("WIAB_GOOGLE_CLIENT_ID").unwrap_or_default(),
+                google_client_secret: std::env::var("WIAB_GOOGLE_CLIENT_SECRET")
+                    .unwrap_or_default(),
+                oidc_issuer: std::env::var("WIAB_OIDC_ISSUER").unwrap_or_default(),
+                oidc_client_id: std::env::var("WIAB_OIDC_CLIENT_ID").unwrap_or_default(),
+                oidc_client_secret: std::env::var("WIAB_OIDC_CLIENT_SECRET").unwrap_or_default(),
+            },
+            email: EmailConfig {
+                from: std::env::var("WIAB_EMAIL_FROM")
+                    .or_else(|_| std::env::var("WIAB_SMTP_FROM"))
+                    .unwrap_or_else(|_| "no-reply@workinabox.local".to_owned()),
+                provider: env_or("WIAB_EMAIL_PROVIDER", "resend"),
+                resend_api_key: std::env::var("RESEND_API_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty()),
+                smtp_host: std::env::var("WIAB_SMTP_HOST")
+                    .ok()
+                    .filter(|h| !h.trim().is_empty()),
+                smtp_port: std::env::var("WIAB_SMTP_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(587),
+                smtp_user: std::env::var("WIAB_SMTP_USER")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                smtp_password: std::env::var("WIAB_SMTP_PASSWORD")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                smtp_tls: env_flag("WIAB_SMTP_TLS"),
+            },
+            dev: {
+                let sso_owner_email = std::env::var("WIAB_DEV_SSO_OWNER_EMAIL").unwrap_or_default();
+                let sso_owner_name = std::env::var("WIAB_DEV_SSO_OWNER_NAME")
+                    .unwrap_or_else(|_| sso_owner_email.clone());
+                DevConfig {
+                    owner_password: env_or("WIAB_DEV_OWNER_PASSWORD", "owner"),
+                    sso_owner_email,
+                    sso_owner_name,
+                    sso_owner_password: std::env::var("WIAB_DEV_SSO_OWNER_PASSWORD")
+                        .ok()
+                        .filter(|p| !p.is_empty()),
+                }
             },
         })
     }

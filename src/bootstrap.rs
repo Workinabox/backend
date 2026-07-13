@@ -272,6 +272,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
             user_service.as_ref(),
             access_service.as_ref(),
             auth_service.as_ref(),
+            &config.dev,
         )
         .await;
     }
@@ -282,6 +283,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         user_service.as_ref(),
         access_service.as_ref(),
         auth_service.as_ref(),
+        &config.dev,
     )
     .await?;
 
@@ -315,13 +317,12 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
 
     // HTTP auth configuration. Cookie `Secure` follows the base-url scheme so the dev
     // HTTP origin still gets its cookie. Signup/Google/OIDC are opt-in (off by default).
-    let base_url =
-        std::env::var("WIAB_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_owned());
+    let base_url = config.auth.base_url.clone();
     let auth_settings = AuthSettings {
         cookie_secure: base_url.starts_with("https"),
-        signup_enabled: env_flag("WIAB_AUTH_LOCAL_SIGNUP"),
-        google_enabled: env_flag("WIAB_AUTH_GOOGLE_ENABLED"),
-        oidc_enabled: env_flag("WIAB_AUTH_OIDC_ENABLED"),
+        signup_enabled: config.auth.local_signup,
+        google_enabled: config.auth.google_enabled,
+        oidc_enabled: config.auth.oidc_enabled,
         base_url,
     };
 
@@ -332,8 +333,8 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         connections.push(FederationConnection {
             slug: "google".to_owned(),
             issuer: "https://accounts.google.com".to_owned(),
-            client_id: std::env::var("WIAB_GOOGLE_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("WIAB_GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+            client_id: config.auth.google_client_id.clone(),
+            client_secret: config.auth.google_client_secret.clone(),
             scopes: vec![
                 "openid".to_owned(),
                 "email".to_owned(),
@@ -348,9 +349,9 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
     if auth_settings.oidc_enabled {
         connections.push(FederationConnection {
             slug: "enterprise".to_owned(),
-            issuer: std::env::var("WIAB_OIDC_ISSUER").unwrap_or_default(),
-            client_id: std::env::var("WIAB_OIDC_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("WIAB_OIDC_CLIENT_SECRET").unwrap_or_default(),
+            issuer: config.auth.oidc_issuer.clone(),
+            client_id: config.auth.oidc_client_id.clone(),
+            client_secret: config.auth.oidc_client_secret.clone(),
             scopes: vec![
                 "openid".to_owned(),
                 "email".to_owned(),
@@ -394,61 +395,50 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
     // Transactional email (reset/invite/verify). Provider is selectable via
     // WIAB_EMAIL_PROVIDER (default "resend"); "smtp" uses lettre. Missing credentials fall
     // back to logging so dev still surfaces the link in the server log.
-    let from = std::env::var("WIAB_EMAIL_FROM")
-        .or_else(|_| std::env::var("WIAB_SMTP_FROM"))
-        .unwrap_or_else(|_| "no-reply@workinabox.local".to_owned());
-    let provider = std::env::var("WIAB_EMAIL_PROVIDER").unwrap_or_else(|_| "resend".to_owned());
-    let email_sender: Arc<dyn EmailSender> = match provider.trim().to_ascii_lowercase().as_str() {
-        "resend" => match std::env::var("RESEND_API_KEY") {
-            Ok(key) if !key.trim().is_empty() => {
-                info!("email delivery: Resend (from {from})");
-                Arc::new(ResendEmailSender::new(key, from))
-            }
-            _ => {
-                info!("email delivery: logging only (set RESEND_API_KEY to send via Resend)");
-                Arc::new(LoggingEmailSender)
-            }
-        },
-        "smtp" => match std::env::var("WIAB_SMTP_HOST") {
-            Ok(host) if !host.trim().is_empty() => {
-                let port = std::env::var("WIAB_SMTP_PORT")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(587);
-                let username = std::env::var("WIAB_SMTP_USER")
-                    .ok()
-                    .filter(|s| !s.is_empty());
-                let password = std::env::var("WIAB_SMTP_PASSWORD")
-                    .ok()
-                    .filter(|s| !s.is_empty());
-                match SmtpEmailSender::new(
-                    &host,
-                    port,
-                    username,
-                    password,
-                    &from,
-                    env_flag("WIAB_SMTP_TLS"),
-                ) {
-                    Ok(sender) => {
-                        info!("email delivery: SMTP {host}:{port}");
-                        Arc::new(sender)
-                    }
-                    Err(error) => {
-                        info!("email delivery: SMTP config invalid ({error}); logging instead");
-                        Arc::new(LoggingEmailSender)
+    let from = config.email.from.clone();
+    let email_sender: Arc<dyn EmailSender> =
+        match config.email.provider.trim().to_ascii_lowercase().as_str() {
+            "resend" => match &config.email.resend_api_key {
+                Some(key) => {
+                    info!("email delivery: Resend (from {from})");
+                    Arc::new(ResendEmailSender::new(key.clone(), from))
+                }
+                None => {
+                    info!("email delivery: logging only (set RESEND_API_KEY to send via Resend)");
+                    Arc::new(LoggingEmailSender)
+                }
+            },
+            "smtp" => match &config.email.smtp_host {
+                Some(host) => {
+                    let port = config.email.smtp_port;
+                    match SmtpEmailSender::new(
+                        host,
+                        port,
+                        config.email.smtp_user.clone(),
+                        config.email.smtp_password.clone(),
+                        &from,
+                        config.email.smtp_tls,
+                    ) {
+                        Ok(sender) => {
+                            info!("email delivery: SMTP {host}:{port}");
+                            Arc::new(sender)
+                        }
+                        Err(error) => {
+                            info!("email delivery: SMTP config invalid ({error}); logging instead");
+                            Arc::new(LoggingEmailSender)
+                        }
                     }
                 }
-            }
-            _ => {
-                info!("email delivery: logging only (set WIAB_SMTP_HOST to send via SMTP)");
+                None => {
+                    info!("email delivery: logging only (set WIAB_SMTP_HOST to send via SMTP)");
+                    Arc::new(LoggingEmailSender)
+                }
+            },
+            other => {
+                info!("email delivery: unknown WIAB_EMAIL_PROVIDER '{other}', logging only");
                 Arc::new(LoggingEmailSender)
             }
-        },
-        other => {
-            info!("email delivery: unknown WIAB_EMAIL_PROVIDER '{other}', logging only");
-            Arc::new(LoggingEmailSender)
-        }
-    };
+        };
     let verification_store = match &pool {
         Some(pool) => {
             VerificationTokenStoreImpl::Postgres(PostgresVerificationTokenStore::new(pool.clone()))
@@ -569,6 +559,7 @@ async fn seed_owner(
     user_service: &UserApplicationService<UserRepo>,
     access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
     auth_service: &WiabAuthService,
+    dev: &crate::config::DevConfig,
 ) {
     let owner = user_service
         .create_user(CreateUserRequest {
@@ -603,10 +594,9 @@ async fn seed_owner(
         .expect("seeded owner exists");
     // Seed a password so a human can log in interactively (the bootstrap token above stays
     // for machine/agent access). Dev-only default; override with WIAB_DEV_OWNER_PASSWORD.
-    let dev_password =
-        std::env::var("WIAB_DEV_OWNER_PASSWORD").unwrap_or_else(|_| "owner".to_owned());
+    let dev_password = &dev.owner_password;
     auth_service
-        .set_password(PrincipalId::new(owner.id.clone()), &dev_password)
+        .set_password(PrincipalId::new(owner.id.clone()), dev_password)
         .await
         .expect("failed to seed owner password");
     info!(
@@ -622,16 +612,17 @@ async fn seed_sso_owner(
     user_service: &UserApplicationService<UserRepo>,
     access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
     auth_service: &WiabAuthService,
+    dev: &crate::config::DevConfig,
 ) -> anyhow::Result<()> {
-    let email = std::env::var("WIAB_DEV_SSO_OWNER_EMAIL").unwrap_or_default();
+    let email = &dev.sso_owner_email;
     if email.is_empty() {
         return Ok(());
     }
-    if user_service.find_by_email(&email).await?.is_some() {
+    if user_service.find_by_email(email).await?.is_some() {
         info!("dev SSO owner '{email}' already present — leaving as-is");
         return Ok(());
     }
-    let name = std::env::var("WIAB_DEV_SSO_OWNER_NAME").unwrap_or_else(|_| email.clone());
+    let name = dev.sso_owner_name.clone();
     let user = user_service
         .create_user(CreateUserRequest {
             kind: "human".to_owned(),
@@ -650,11 +641,9 @@ async fn seed_sso_owner(
         .await
         .context("failed to grant dev SSO owner role")?;
     // Optional local-password fallback for first run if SSO misbehaves.
-    if let Ok(password) = std::env::var("WIAB_DEV_SSO_OWNER_PASSWORD")
-        && !password.is_empty()
-    {
+    if let Some(password) = &dev.sso_owner_password {
         auth_service
-            .set_password(PrincipalId::new(user.id.clone()), &password)
+            .set_password(PrincipalId::new(user.id.clone()), password)
             .await
             .context("failed to set dev SSO owner password")?;
     }
