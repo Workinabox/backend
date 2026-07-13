@@ -55,7 +55,9 @@ use wiab_inf::{
     WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
-pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::Result<AppState> {
+pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
+    let persistence = &config.serve.persistence;
+    let database_url = &config.serve.database_url;
     let seed_clock = SystemClock;
     let meeting_repository = InMemoryMeetingRepository::with_seed_data(|| seed_clock.now_rfc3339());
     let intelligence = load_meeting_intelligence()?;
