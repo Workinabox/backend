@@ -38,21 +38,21 @@ use wiab_core::{
     work::WorkRepository,
 };
 use wiab_inf::{
-    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, DockerConfig,
-    DockerRuntime, FirecrackerConfig, FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering,
-    InMemoryAgentRepository, InMemoryBoardNumbering, InMemoryBoardRepository,
-    InMemoryMeetingRepository, InMemoryOrganizationNumbering, InMemoryOrganizationRepository,
-    InMemoryPipelineNumbering, InMemoryPipelineRepository, InMemoryProjectNumbering,
-    InMemoryProjectRepository, InMemoryRepoNumbering, InMemoryRepoRepository,
-    InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository, InMemoryUserNumbering,
-    InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering,
-    InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo,
-    PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
-    PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
-    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresVmRepository,
-    PostgresWorkRepository, ProjectRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu,
-    Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo, VmRepo, VmRuntimeDispatch,
-    WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
+    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, DockerRuntime,
+    FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering, InMemoryAgentRepository,
+    InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
+    InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
+    InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
+    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
+    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
+    InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
+    LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
+    PostgresProjectRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
+    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
+    RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
+    Sha256TokenHasher, SystemClock, UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService,
+    WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
@@ -131,16 +131,15 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
     };
     let vm_numbering =
         InMemoryVmNumbering::starting_at(next_after(&vm_repo.list().await?, |vm| vm.id().number()));
-    let vm_runtime =
-        if env_flag("WIAB_FIRECRACKER_ENABLED") && std::path::Path::new("/dev/kvm").exists() {
-            info!("vm runtime: firecracker (/dev/kvm present)");
-            VmRuntimeDispatch::Firecracker(Box::new(FirecrackerRuntime::new(
-                FirecrackerConfig::from_env(),
-            )))
-        } else {
-            info!("vm runtime: docker (firecracker disabled or /dev/kvm absent)");
-            VmRuntimeDispatch::Docker(DockerRuntime::new(DockerConfig::from_env()).await?)
-        };
+    let vm_runtime = if config.vm.firecracker_enabled && std::path::Path::new("/dev/kvm").exists() {
+        info!("vm runtime: firecracker (/dev/kvm present)");
+        VmRuntimeDispatch::Firecracker(Box::new(FirecrackerRuntime::new(
+            config.vm.firecracker.clone(),
+        )))
+    } else {
+        info!("vm runtime: docker (firecracker disabled or /dev/kvm absent)");
+        VmRuntimeDispatch::Docker(DockerRuntime::new(config.vm.docker.clone()).await?)
+    };
     let vm_service = VmApplicationService::new(
         vm_repo,
         organization_repo.clone(),

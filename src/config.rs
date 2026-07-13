@@ -9,11 +9,14 @@
 //! (Firecracker, Docker, Llama, Whisper, media) live in that crate next to their components; the
 //! groups consumed here in the binary (serve, auth, email, dev-seeding) live in this module.
 
+use wiab_inf::{DockerConfig, FirecrackerConfig};
+
 use crate::Cli;
 
 /// The whole backend configuration, resolved once at startup.
 pub struct AppConfig {
     pub serve: ServeConfig,
+    pub vm: VmConfig,
 }
 
 /// Process/serving config: persistence selection, the addresses we bind, and TLS material.
@@ -33,6 +36,15 @@ pub struct ServeConfig {
     pub rust_log: String,
 }
 
+/// VM runtime selection and per-backend config. Firecracker is used only when enabled AND
+/// `/dev/kvm` is present (checked at bootstrap); otherwise the Docker backend runs.
+pub struct VmConfig {
+    /// `WIAB_FIRECRACKER_ENABLED` — half the Firecracker decision (the other half is `/dev/kvm`).
+    pub firecracker_enabled: bool,
+    pub firecracker: FirecrackerConfig,
+    pub docker: DockerConfig,
+}
+
 impl AppConfig {
     /// Resolve the full configuration from the parsed CLI plus the environment. Reads only —
     /// heavy work (DB connect, model loading) stays in `build_app_state`.
@@ -47,6 +59,11 @@ impl AppConfig {
                 tls_key: std::env::var("WIAB_TLS_KEY").ok(),
                 rust_log: env_or("RUST_LOG", "wiab=info,tower_http=info"),
             },
+            vm: VmConfig {
+                firecracker_enabled: env_flag("WIAB_FIRECRACKER_ENABLED"),
+                firecracker: FirecrackerConfig::from_env(),
+                docker: DockerConfig::from_env(),
+            },
         })
     }
 }
@@ -54,4 +71,16 @@ impl AppConfig {
 /// Read an env var, falling back to a default when unset.
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+/// Reads a boolean env flag (`1`/`true`/`yes`/`on` = true), defaulting to false when unset.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
