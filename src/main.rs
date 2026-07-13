@@ -1,4 +1,5 @@
 mod bootstrap;
+mod config;
 
 use std::net::SocketAddr;
 
@@ -7,6 +8,8 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use tracing::{info, warn};
 use wiab_inf::{http_router, spawn_git_ssh_server};
+
+use crate::config::{AppConfig, ServeConfig};
 
 /// Backend configuration. Each value defaults to a baked-in dev value, can be overridden by
 /// an environment variable, and can be overridden again by a command-line flag (which wins).
@@ -52,32 +55,40 @@ fn redact_password(url: &str) -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
 
-    // Parse via ArgMatches so we can report where each value came from.
+    // Parse via ArgMatches so we can report where each value came from, then resolve the full
+    // configuration once (env is read only inside `AppConfig::load`).
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
+    let config = AppConfig::load(&cli)?;
+
+    init_tracing(&config.serve.rust_log);
     info!(
         "config: persistence = {} ({})",
-        cli.persistence,
+        config.serve.persistence,
         source_label(&matches, "persistence", "WIAB_PERSISTENCE", "--persistence"),
     );
-    if cli.persistence.trim().eq_ignore_ascii_case("postgres") {
+    if config
+        .serve
+        .persistence
+        .trim()
+        .eq_ignore_ascii_case("postgres")
+    {
         info!(
             "config: database_url = {} ({})",
-            redact_password(&cli.database_url),
+            redact_password(&config.serve.database_url),
             source_label(&matches, "database_url", "DATABASE_URL", "--database-url"),
         );
     }
 
-    let state = bootstrap::build_app_state(&cli.persistence, &cli.database_url).await?;
+    let state = bootstrap::build_app_state(&config).await?;
 
     // Git SSH transport runs on its own port alongside the HTTPS server.
-    let ssh_addr = std::env::var("WIAB_GIT_SSH_ADDR").unwrap_or_else(|_| "0.0.0.0:2222".to_owned());
-    let ssh_host_key = std::env::var("WIAB_GIT_SSH_HOST_KEY").ok();
+    let ssh_addr = config.serve.git_ssh_addr.clone();
+    let ssh_host_key = config.serve.git_ssh_host_key.clone();
     {
         let state = state.clone();
         tokio::spawn(async move {
@@ -92,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = "0.0.0.0:8080"
         .parse()
         .context("invalid backend bind address")?;
-    let tls = load_tls_config().await?;
+    let tls = load_tls_config(&config.serve).await?;
     info!("wiab backend listening on https://{addr}");
 
     axum_server::bind_rustls(addr, tls)
@@ -106,12 +117,9 @@ async fn main() -> anyhow::Result<()> {
 /// Loads the TLS cert/key from `WIAB_TLS_CERT`/`WIAB_TLS_KEY` (PEM), or generates a
 /// self-signed cert. The backend always serves HTTPS; a reverse proxy connects to it over
 /// TLS (with verification disabled for the self-signed case).
-async fn load_tls_config() -> anyhow::Result<RustlsConfig> {
-    match (
-        std::env::var("WIAB_TLS_CERT"),
-        std::env::var("WIAB_TLS_KEY"),
-    ) {
-        (Ok(cert), Ok(key)) => RustlsConfig::from_pem_file(cert, key)
+async fn load_tls_config(serve: &ServeConfig) -> anyhow::Result<RustlsConfig> {
+    match (&serve.tls_cert, &serve.tls_key) {
+        (Some(cert), Some(key)) => RustlsConfig::from_pem_file(cert, key)
             .await
             .context("failed to load TLS cert/key"),
         _ => {
@@ -134,10 +142,8 @@ async fn load_tls_config() -> anyhow::Result<RustlsConfig> {
     }
 }
 
-fn init_tracing() {
+fn init_tracing(filter: &str) {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "wiab=info,tower_http=info".to_owned()),
-        )
+        .with_env_filter(filter.to_owned())
         .init();
 }

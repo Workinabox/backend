@@ -38,27 +38,29 @@ use wiab_core::{
     work::WorkRepository,
 };
 use wiab_inf::{
-    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, DockerConfig,
-    DockerRuntime, FirecrackerConfig, FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering,
-    InMemoryAgentRepository, InMemoryBoardNumbering, InMemoryBoardRepository,
-    InMemoryMeetingRepository, InMemoryOrganizationNumbering, InMemoryOrganizationRepository,
-    InMemoryPipelineNumbering, InMemoryPipelineRepository, InMemoryProjectNumbering,
-    InMemoryProjectRepository, InMemoryRepoNumbering, InMemoryRepoRepository,
-    InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository, InMemoryUserNumbering,
-    InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering,
-    InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo,
-    PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
-    PostgresPipelineRepository, PostgresProjectRepository, PostgresRepoRepository,
-    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresVmRepository,
-    PostgresWorkRepository, ProjectRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu,
-    Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo, VmRepo, VmRuntimeDispatch,
-    WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
+    AgentRepo, AppState, AuthSettings, BoardRepo, DefaultSpeechSynthesizer, DockerRuntime,
+    FirecrackerRuntime, Git2Backend, InMemoryAgentNumbering, InMemoryAgentRepository,
+    InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
+    InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
+    InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
+    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
+    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
+    InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
+    LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
+    PostgresProjectRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
+    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
+    RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
+    Sha256TokenHasher, SystemClock, UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService,
+    WiabUserDirectory, WorkRepo, pg_pool,
 };
 
-pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::Result<AppState> {
+pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
+    let persistence = &config.serve.persistence;
+    let database_url = &config.serve.database_url;
     let seed_clock = SystemClock;
     let meeting_repository = InMemoryMeetingRepository::with_seed_data(|| seed_clock.now_rfc3339());
-    let intelligence = load_meeting_intelligence()?;
+    let intelligence = load_meeting_intelligence(&config.meeting)?;
     let meeting_service = Arc::new(MeetingApplicationService::new(
         meeting_repository.clone(),
         intelligence,
@@ -129,16 +131,15 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
     };
     let vm_numbering =
         InMemoryVmNumbering::starting_at(next_after(&vm_repo.list().await?, |vm| vm.id().number()));
-    let vm_runtime =
-        if env_flag("WIAB_FIRECRACKER_ENABLED") && std::path::Path::new("/dev/kvm").exists() {
-            info!("vm runtime: firecracker (/dev/kvm present)");
-            VmRuntimeDispatch::Firecracker(Box::new(FirecrackerRuntime::new(
-                FirecrackerConfig::from_env(),
-            )))
-        } else {
-            info!("vm runtime: docker (firecracker disabled or /dev/kvm absent)");
-            VmRuntimeDispatch::Docker(DockerRuntime::new(DockerConfig::from_env()).await?)
-        };
+    let vm_runtime = if config.vm.firecracker_enabled && std::path::Path::new("/dev/kvm").exists() {
+        info!("vm runtime: firecracker (/dev/kvm present)");
+        VmRuntimeDispatch::Firecracker(Box::new(FirecrackerRuntime::new(
+            config.vm.firecracker.clone(),
+        )))
+    } else {
+        info!("vm runtime: docker (firecracker disabled or /dev/kvm absent)");
+        VmRuntimeDispatch::Docker(DockerRuntime::new(config.vm.docker.clone()).await?)
+    };
     let vm_service = VmApplicationService::new(
         vm_repo,
         organization_repo.clone(),
@@ -175,9 +176,7 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         Arc::new(board_numbering),
     ));
 
-    let git_root = std::env::var("WIAB_GIT_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("wiab-git"));
+    let git_root = config.serve.git_root.clone();
     std::fs::create_dir_all(&git_root)
         .with_context(|| format!("failed to create git root {}", git_root.display()))?;
     info!("hosting git repos under {}", git_root.display());
@@ -271,6 +270,7 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
             user_service.as_ref(),
             access_service.as_ref(),
             auth_service.as_ref(),
+            &config.dev,
         )
         .await;
     }
@@ -281,6 +281,7 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         user_service.as_ref(),
         access_service.as_ref(),
         auth_service.as_ref(),
+        &config.dev,
     )
     .await?;
 
@@ -314,13 +315,12 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
 
     // HTTP auth configuration. Cookie `Secure` follows the base-url scheme so the dev
     // HTTP origin still gets its cookie. Signup/Google/OIDC are opt-in (off by default).
-    let base_url =
-        std::env::var("WIAB_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_owned());
+    let base_url = config.auth.base_url.clone();
     let auth_settings = AuthSettings {
         cookie_secure: base_url.starts_with("https"),
-        signup_enabled: env_flag("WIAB_AUTH_LOCAL_SIGNUP"),
-        google_enabled: env_flag("WIAB_AUTH_GOOGLE_ENABLED"),
-        oidc_enabled: env_flag("WIAB_AUTH_OIDC_ENABLED"),
+        signup_enabled: config.auth.local_signup,
+        google_enabled: config.auth.google_enabled,
+        oidc_enabled: config.auth.oidc_enabled,
         base_url,
     };
 
@@ -331,8 +331,8 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
         connections.push(FederationConnection {
             slug: "google".to_owned(),
             issuer: "https://accounts.google.com".to_owned(),
-            client_id: std::env::var("WIAB_GOOGLE_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("WIAB_GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+            client_id: config.auth.google_client_id.clone(),
+            client_secret: config.auth.google_client_secret.clone(),
             scopes: vec![
                 "openid".to_owned(),
                 "email".to_owned(),
@@ -347,9 +347,9 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
     if auth_settings.oidc_enabled {
         connections.push(FederationConnection {
             slug: "enterprise".to_owned(),
-            issuer: std::env::var("WIAB_OIDC_ISSUER").unwrap_or_default(),
-            client_id: std::env::var("WIAB_OIDC_CLIENT_ID").unwrap_or_default(),
-            client_secret: std::env::var("WIAB_OIDC_CLIENT_SECRET").unwrap_or_default(),
+            issuer: config.auth.oidc_issuer.clone(),
+            client_id: config.auth.oidc_client_id.clone(),
+            client_secret: config.auth.oidc_client_secret.clone(),
             scopes: vec![
                 "openid".to_owned(),
                 "email".to_owned(),
@@ -393,61 +393,50 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
     // Transactional email (reset/invite/verify). Provider is selectable via
     // WIAB_EMAIL_PROVIDER (default "resend"); "smtp" uses lettre. Missing credentials fall
     // back to logging so dev still surfaces the link in the server log.
-    let from = std::env::var("WIAB_EMAIL_FROM")
-        .or_else(|_| std::env::var("WIAB_SMTP_FROM"))
-        .unwrap_or_else(|_| "no-reply@workinabox.local".to_owned());
-    let provider = std::env::var("WIAB_EMAIL_PROVIDER").unwrap_or_else(|_| "resend".to_owned());
-    let email_sender: Arc<dyn EmailSender> = match provider.trim().to_ascii_lowercase().as_str() {
-        "resend" => match std::env::var("RESEND_API_KEY") {
-            Ok(key) if !key.trim().is_empty() => {
-                info!("email delivery: Resend (from {from})");
-                Arc::new(ResendEmailSender::new(key, from))
-            }
-            _ => {
-                info!("email delivery: logging only (set RESEND_API_KEY to send via Resend)");
-                Arc::new(LoggingEmailSender)
-            }
-        },
-        "smtp" => match std::env::var("WIAB_SMTP_HOST") {
-            Ok(host) if !host.trim().is_empty() => {
-                let port = std::env::var("WIAB_SMTP_PORT")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(587);
-                let username = std::env::var("WIAB_SMTP_USER")
-                    .ok()
-                    .filter(|s| !s.is_empty());
-                let password = std::env::var("WIAB_SMTP_PASSWORD")
-                    .ok()
-                    .filter(|s| !s.is_empty());
-                match SmtpEmailSender::new(
-                    &host,
-                    port,
-                    username,
-                    password,
-                    &from,
-                    env_flag("WIAB_SMTP_TLS"),
-                ) {
-                    Ok(sender) => {
-                        info!("email delivery: SMTP {host}:{port}");
-                        Arc::new(sender)
-                    }
-                    Err(error) => {
-                        info!("email delivery: SMTP config invalid ({error}); logging instead");
-                        Arc::new(LoggingEmailSender)
+    let from = config.email.from.clone();
+    let email_sender: Arc<dyn EmailSender> =
+        match config.email.provider.trim().to_ascii_lowercase().as_str() {
+            "resend" => match &config.email.resend_api_key {
+                Some(key) => {
+                    info!("email delivery: Resend (from {from})");
+                    Arc::new(ResendEmailSender::new(key.clone(), from))
+                }
+                None => {
+                    info!("email delivery: logging only (set RESEND_API_KEY to send via Resend)");
+                    Arc::new(LoggingEmailSender)
+                }
+            },
+            "smtp" => match &config.email.smtp_host {
+                Some(host) => {
+                    let port = config.email.smtp_port;
+                    match SmtpEmailSender::new(
+                        host,
+                        port,
+                        config.email.smtp_user.clone(),
+                        config.email.smtp_password.clone(),
+                        &from,
+                        config.email.smtp_tls,
+                    ) {
+                        Ok(sender) => {
+                            info!("email delivery: SMTP {host}:{port}");
+                            Arc::new(sender)
+                        }
+                        Err(error) => {
+                            info!("email delivery: SMTP config invalid ({error}); logging instead");
+                            Arc::new(LoggingEmailSender)
+                        }
                     }
                 }
-            }
-            _ => {
-                info!("email delivery: logging only (set WIAB_SMTP_HOST to send via SMTP)");
+                None => {
+                    info!("email delivery: logging only (set WIAB_SMTP_HOST to send via SMTP)");
+                    Arc::new(LoggingEmailSender)
+                }
+            },
+            other => {
+                info!("email delivery: unknown WIAB_EMAIL_PROVIDER '{other}', logging only");
                 Arc::new(LoggingEmailSender)
             }
-        },
-        other => {
-            info!("email delivery: unknown WIAB_EMAIL_PROVIDER '{other}', logging only");
-            Arc::new(LoggingEmailSender)
-        }
-    };
+        };
     let verification_store = match &pool {
         Some(pool) => {
             VerificationTokenStoreImpl::Postgres(PostgresVerificationTokenStore::new(pool.clone()))
@@ -483,7 +472,7 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
 
     let (transcript_tx, transcript_rx) = mpsc::unbounded_channel::<FinalizedTranscript>();
     let sfu = Arc::new(
-        Sfu::new(meeting_service.clone(), transcript_tx)
+        Sfu::new(meeting_service.clone(), &config.media, transcript_tx)
             .await
             .context("failed to initialize SFU")?,
     );
@@ -518,18 +507,6 @@ pub async fn build_app_state(persistence: &str, database_url: &str) -> anyhow::R
 /// restart instead of colliding with persisted ids. Returns 0 for an empty store.
 fn next_after<T>(items: &[T], number: impl Fn(&T) -> u64) -> u64 {
     items.iter().map(number).max().unwrap_or(0)
-}
-
-/// Reads a boolean env flag (`1`/`true`/`yes`/`on` = true), defaulting to false when unset.
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 }
 
 async fn seed_default_organization(
@@ -568,6 +545,7 @@ async fn seed_owner(
     user_service: &UserApplicationService<UserRepo>,
     access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
     auth_service: &WiabAuthService,
+    dev: &crate::config::DevConfig,
 ) {
     let owner = user_service
         .create_user(CreateUserRequest {
@@ -602,10 +580,9 @@ async fn seed_owner(
         .expect("seeded owner exists");
     // Seed a password so a human can log in interactively (the bootstrap token above stays
     // for machine/agent access). Dev-only default; override with WIAB_DEV_OWNER_PASSWORD.
-    let dev_password =
-        std::env::var("WIAB_DEV_OWNER_PASSWORD").unwrap_or_else(|_| "owner".to_owned());
+    let dev_password = &dev.owner_password;
     auth_service
-        .set_password(PrincipalId::new(owner.id.clone()), &dev_password)
+        .set_password(PrincipalId::new(owner.id.clone()), dev_password)
         .await
         .expect("failed to seed owner password");
     info!(
@@ -621,16 +598,17 @@ async fn seed_sso_owner(
     user_service: &UserApplicationService<UserRepo>,
     access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
     auth_service: &WiabAuthService,
+    dev: &crate::config::DevConfig,
 ) -> anyhow::Result<()> {
-    let email = std::env::var("WIAB_DEV_SSO_OWNER_EMAIL").unwrap_or_default();
+    let email = &dev.sso_owner_email;
     if email.is_empty() {
         return Ok(());
     }
-    if user_service.find_by_email(&email).await?.is_some() {
+    if user_service.find_by_email(email).await?.is_some() {
         info!("dev SSO owner '{email}' already present — leaving as-is");
         return Ok(());
     }
-    let name = std::env::var("WIAB_DEV_SSO_OWNER_NAME").unwrap_or_else(|_| email.clone());
+    let name = dev.sso_owner_name.clone();
     let user = user_service
         .create_user(CreateUserRequest {
             kind: "human".to_owned(),
@@ -649,11 +627,9 @@ async fn seed_sso_owner(
         .await
         .context("failed to grant dev SSO owner role")?;
     // Optional local-password fallback for first run if SSO misbehaves.
-    if let Ok(password) = std::env::var("WIAB_DEV_SSO_OWNER_PASSWORD")
-        && !password.is_empty()
-    {
+    if let Some(password) = &dev.sso_owner_password {
         auth_service
-            .set_password(PrincipalId::new(user.id.clone()), &password)
+            .set_password(PrincipalId::new(user.id.clone()), password)
             .await
             .context("failed to set dev SSO owner password")?;
     }
@@ -689,13 +665,15 @@ fn spawn_transcript_runtime(
     });
 }
 
-fn load_meeting_intelligence() -> anyhow::Result<Option<Arc<dyn MeetingIntelligence>>> {
-    if !env_flag("WIAB_LLAMA_ENABLED") {
+fn load_meeting_intelligence(
+    meeting: &crate::config::MeetingConfig,
+) -> anyhow::Result<Option<Arc<dyn MeetingIntelligence>>> {
+    let Some(llama) = &meeting.llama else {
         info!("meeting intelligence disabled (WIAB_LLAMA_ENABLED off)");
         return Ok(None);
-    }
+    };
 
-    let intelligence = LlamaMeetingIntelligence::from_env()
+    let intelligence = LlamaMeetingIntelligence::new(llama)
         .context("failed to initialize llama meeting intelligence")?;
     info!("meeting intelligence adapter: llama (eager-loaded)");
     Ok(Some(Arc::new(intelligence)))
