@@ -9,6 +9,8 @@
 //! (Firecracker, Docker, Llama, Whisper, media) live in that crate next to their components; the
 //! groups consumed here in the binary (serve, auth, email, dev-seeding) live in this module.
 
+use std::path::PathBuf;
+
 use wiab_inf::{DockerConfig, FirecrackerConfig, LlamaConfig, MediaConfig};
 
 use crate::Cli;
@@ -37,6 +39,8 @@ pub struct ServeConfig {
     /// TLS cert/key PEM paths (`WIAB_TLS_CERT`/`WIAB_TLS_KEY`); both unset → self-signed.
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// Directory hosting git repos (`WIAB_GIT_ROOT`, else a temp dir).
+    pub git_root: PathBuf,
     /// Tracing filter (`RUST_LOG`).
     pub rust_log: String,
 }
@@ -105,6 +109,9 @@ impl AppConfig {
                 git_ssh_host_key: std::env::var("WIAB_GIT_SSH_HOST_KEY").ok(),
                 tls_cert: std::env::var("WIAB_TLS_CERT").ok(),
                 tls_key: std::env::var("WIAB_TLS_KEY").ok(),
+                git_root: std::env::var("WIAB_GIT_ROOT")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| std::env::temp_dir().join("wiab-git")),
                 rust_log: env_or("RUST_LOG", "wiab=info,tower_http=info"),
             },
             vm: VmConfig {

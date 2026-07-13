@@ -176,9 +176,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         Arc::new(board_numbering),
     ));
 
-    let git_root = std::env::var("WIAB_GIT_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("wiab-git"));
+    let git_root = config.serve.git_root.clone();
     std::fs::create_dir_all(&git_root)
         .with_context(|| format!("failed to create git root {}", git_root.display()))?;
     info!("hosting git repos under {}", git_root.display());
