@@ -473,6 +473,20 @@ mod tests {
                 });
             Ok(wiab_core::repo::CommitHash::new(hash).unwrap())
         }
+
+        /// Not exercised by these tests — the repo service never merges. Present only
+        /// to satisfy the port; `PullRequestApplicationService`'s tests cover merging.
+        fn merge_branch(
+            &self,
+            _id: &RepoId,
+            _source: &BranchName,
+            _target: &BranchName,
+            _author_name: &str,
+            _author_email: &str,
+            _message: &str,
+        ) -> Result<wiab_core::repo::CommitHash, GitBackendError> {
+            unimplemented!("the repo service does not merge branches")
+        }
     }
 
     fn service() -> RepoApplicationService<TestRepoRepository, TestProjectRepository> {

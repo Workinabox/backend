@@ -11,14 +11,14 @@ use authbox_inf::{
 use wiab_app::{
     AccessApplicationService, AgentApplicationService, AuthorizationService,
     BoardApplicationService, MeetingApplicationService, OrganizationApplicationService,
-    PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
-    UserApplicationService, VmApplicationService, WorkApplicationService,
+    PipelineApplicationService, ProjectApplicationService, PullRequestApplicationService,
+    RepoApplicationService, UserApplicationService, VmApplicationService, WorkApplicationService,
 };
 
 use crate::{
     AgentRepo, BoardRepo, InMemoryMeetingRepository, OrganizationRepo, PipelineRepo, ProjectRepo,
-    RepoRepo, RoleAssignmentRepo, Sfu, UserRepo, VmRepo, VmRuntimeDispatch, WiabUserDirectory,
-    WorkRepo,
+    PullRequestRepo, RepoRepo, RoleAssignmentRepo, Sfu, UserRepo, VmRepo, VmRuntimeDispatch,
+    WiabUserDirectory, WorkRepo,
 };
 
 /// The fully-resolved vm application service (its runtime is chosen at boot — see bootstrap).
@@ -69,6 +69,7 @@ pub struct AppState {
     pub project_service: Arc<ProjectApplicationService<ProjectRepo, OrganizationRepo>>,
     pub agent_service: Arc<AgentApplicationService<AgentRepo, OrganizationRepo, WiabVmService>>,
     pub board_service: Arc<BoardApplicationService<BoardRepo, ProjectRepo>>,
+    pub pull_request_service: Arc<PullRequestApplicationService<PullRequestRepo, RepoRepo>>,
     pub repo_service: Arc<RepoApplicationService<RepoRepo, ProjectRepo>>,
     pub user_service: Arc<UserApplicationService<UserRepo>>,
     /// Reusable authentication (password login + browser sessions), keyed on the user id.

@@ -7,6 +7,7 @@ pub mod meeting_traits;
 pub mod organization;
 pub mod pipeline;
 pub mod project;
+pub mod pull_request;
 pub mod repo;
 pub mod repository;
 pub mod transcript;

@@ -14,6 +14,7 @@ use wiab_core::board::{Board, BoardId, BoardRepository};
 use wiab_core::organization::{Organization, OrganizationId, OrganizationRepository};
 use wiab_core::pipeline::{Pipeline, PipelineId, PipelineRepository};
 use wiab_core::project::{Project, ProjectId, ProjectRepository};
+use wiab_core::pull_request::{PullRequest, PullRequestId, PullRequestRepository};
 use wiab_core::repo::{Repo, RepoId, RepoRepository};
 use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::user::{User, UserId, UserRepository};
@@ -22,12 +23,12 @@ use wiab_core::work::{Work, WorkId, WorkRepository};
 
 use crate::{
     InMemoryAgentRepository, InMemoryBoardRepository, InMemoryOrganizationRepository,
-    InMemoryPipelineRepository, InMemoryProjectRepository, InMemoryRepoRepository,
-    InMemoryRoleAssignmentRepository, InMemoryUserRepository, InMemoryVmRepository,
-    InMemoryWorkRepository, PostgresAgentRepository, PostgresBoardRepository,
+    InMemoryPipelineRepository, InMemoryProjectRepository, InMemoryPullRequestRepository,
+    InMemoryRepoRepository, InMemoryRoleAssignmentRepository, InMemoryUserRepository,
+    InMemoryVmRepository, InMemoryWorkRepository, PostgresAgentRepository, PostgresBoardRepository,
     PostgresOrganizationRepository, PostgresPipelineRepository, PostgresProjectRepository,
-    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresUserRepository,
-    PostgresVmRepository, PostgresWorkRepository,
+    PostgresPullRequestRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
+    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository,
 };
 
 #[derive(Clone)]
@@ -172,6 +173,39 @@ impl RepoRepository for RepoRepo {
     }
 
     async fn list(&self) -> Result<Vec<Repo>, RepoError> {
+        match self {
+            Self::InMemory(inner) => inner.list().await,
+            Self::Postgres(inner) => inner.list().await,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum PullRequestRepo {
+    InMemory(InMemoryPullRequestRepository),
+    Postgres(PostgresPullRequestRepository),
+}
+
+impl PullRequestRepository for PullRequestRepo {
+    async fn save(
+        &self,
+        pull_request: PullRequest,
+        expected: Version,
+    ) -> Result<Version, SaveError> {
+        match self {
+            Self::InMemory(inner) => inner.save(pull_request, expected).await,
+            Self::Postgres(inner) => inner.save(pull_request, expected).await,
+        }
+    }
+
+    async fn get(&self, id: &PullRequestId) -> Result<Option<(PullRequest, Version)>, RepoError> {
+        match self {
+            Self::InMemory(inner) => inner.get(id).await,
+            Self::Postgres(inner) => inner.get(id).await,
+        }
+    }
+
+    async fn list(&self) -> Result<Vec<PullRequest>, RepoError> {
         match self {
             Self::InMemory(inner) => inner.list().await,
             Self::Postgres(inner) => inner.list().await,

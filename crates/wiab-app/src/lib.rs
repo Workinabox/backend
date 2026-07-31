@@ -15,6 +15,8 @@ mod pipeline_application_service;
 mod pipeline_requests;
 mod project_application_service;
 mod project_requests;
+mod pull_request_application_service;
+mod pull_request_requests;
 mod repo_application_service;
 mod repo_requests;
 mod user_application_service;
@@ -42,6 +44,8 @@ pub use pipeline_application_service::PipelineApplicationService;
 pub use pipeline_requests::{CreatePipelineRequest, UpdatePipelineRequest};
 pub use project_application_service::ProjectApplicationService;
 pub use project_requests::{CreateProjectRequest, UpdateProjectRequest};
+pub use pull_request_application_service::PullRequestApplicationService;
+pub use pull_request_requests::{MergePullRequestRequest, OpenPullRequestRequest};
 pub use repo_application_service::RepoApplicationService;
 pub use repo_requests::{
     CommitChangesRequest, CreateRepoRequest, SetVisibilityRequest, UpdateRepoRequest,

@@ -20,8 +20,8 @@ use wiab_app::{
     AccessApplicationService, AgentApplicationService, AuthorizationService,
     BoardApplicationService, CreateOrganizationRequest, CreateProjectRequest, CreateUserRequest,
     IssueTokenRequest, MeetingApplicationService, OrganizationApplicationService,
-    PipelineApplicationService, ProjectApplicationService, RepoApplicationService,
-    UserApplicationService, VmApplicationService, WorkApplicationService,
+    PipelineApplicationService, ProjectApplicationService, PullRequestApplicationService,
+    RepoApplicationService, UserApplicationService, VmApplicationService, WorkApplicationService,
 };
 use wiab_core::{
     access::{Role, RoleAssignmentRepository, Scope},
@@ -31,6 +31,7 @@ use wiab_core::{
     organization::{OrganizationId, OrganizationRepository},
     pipeline::PipelineRepository,
     project::ProjectRepository,
+    pull_request::PullRequestRepository,
     repo::{GitBackend, RepoRepository},
     transcript::FinalizedTranscript,
     user::{UserId, UserRepository},
@@ -43,16 +44,16 @@ use wiab_inf::{
     InMemoryBoardNumbering, InMemoryBoardRepository, InMemoryMeetingRepository,
     InMemoryOrganizationNumbering, InMemoryOrganizationRepository, InMemoryPipelineNumbering,
     InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
-    InMemoryRepoNumbering, InMemoryRepoRepository, InMemoryRoleAssignmentNumbering,
-    InMemoryRoleAssignmentRepository, InMemoryUserNumbering, InMemoryUserRepository,
-    InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
-    LlamaMeetingIntelligence, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
-    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
-    PostgresProjectRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
-    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
-    RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
-    Sha256TokenHasher, SystemClock, UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService,
-    WiabUserDirectory, WorkRepo, pg_pool,
+    InMemoryPullRequestNumbering, InMemoryPullRequestRepository, InMemoryRepoNumbering,
+    InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
+    InMemoryUserNumbering, InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository,
+    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo,
+    PipelineRepo, PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
+    PostgresPipelineRepository, PostgresProjectRepository, PostgresPullRequestRepository,
+    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresUserRepository,
+    PostgresVmRepository, PostgresWorkRepository, ProjectRepo, PullRequestRepo, RandomTokenFactory,
+    RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock,
+    UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
@@ -194,7 +195,23 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         repo_repo.clone(),
         project_repo.clone(),
         Arc::new(repo_numbering),
+        git_backend.clone(),
+    ));
+
+    let pull_request_repo = match &pool {
+        Some(pool) => PullRequestRepo::Postgres(PostgresPullRequestRepository::new(pool.clone())),
+        None => PullRequestRepo::InMemory(InMemoryPullRequestRepository::new()),
+    };
+    let pull_request_numbering = InMemoryPullRequestNumbering::starting_at(next_after(
+        &pull_request_repo.list().await?,
+        |pull_request| pull_request.id().number(),
+    ));
+    let pull_request_service = Arc::new(PullRequestApplicationService::new(
+        pull_request_repo.clone(),
+        repo_repo.clone(),
+        Arc::new(pull_request_numbering),
         git_backend,
+        Arc::new(SystemClock),
     ));
 
     // Identity, credentials, and access control.
@@ -484,6 +501,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         project_service,
         agent_service,
         board_service,
+        pull_request_service,
         repo_service,
         user_service,
         auth_service,
