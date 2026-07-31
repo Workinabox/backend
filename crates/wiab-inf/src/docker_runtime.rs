@@ -23,9 +23,14 @@ use bollard::query_parameters::{
 };
 use wiab_app::{RuntimeHandle, VmRuntime, VmRuntimeError, VmSpec};
 
+use crate::agent_runtime::{AgentRuntime, langgraph_env};
+
 /// Image naming + networking, read from env with defaults.
 #[derive(Clone, Debug)]
 pub struct DockerConfig {
+    /// Which agent runs in the container; selects the image family and whether the
+    /// guest gets a writable workspace.
+    pub agent_runtime: AgentRuntime,
     /// Image = `<image_prefix><template>:<image_tag>` (e.g. `wiab-agent-developer:latest`).
     pub image_prefix: String,
     pub image_tag: String,
@@ -35,17 +40,23 @@ pub struct DockerConfig {
     pub model_endpoint: String,
     /// Seconds to wait for a graceful stop before Docker force-kills the container.
     pub stop_timeout_secs: i32,
+    /// Size of the writable `/workspace` tmpfs, MiB. Only mounted for agent
+    /// runtimes that need one.
+    pub workspace_mib: u64,
 }
 
 impl DockerConfig {
     pub fn from_env() -> Self {
         let get = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_owned());
+        let agent_runtime = AgentRuntime::from_env();
         Self {
-            image_prefix: get("WIAB_DOCKER_IMAGE_PREFIX", "wiab-agent-"),
+            agent_runtime,
+            image_prefix: get("WIAB_DOCKER_IMAGE_PREFIX", agent_runtime.image_prefix()),
             image_tag: get("WIAB_DOCKER_IMAGE_TAG", "latest"),
             network: get("WIAB_DOCKER_NETWORK", ""),
             model_endpoint: get("WIAB_MODEL_ENDPOINT", ""),
             stop_timeout_secs: get("WIAB_DOCKER_STOP_TIMEOUT", "10").parse().unwrap_or(10),
+            workspace_mib: get("WIAB_WORKSPACE_MIB", "2048").parse().unwrap_or(2048),
         }
     }
 }
@@ -128,7 +139,16 @@ impl VmRuntime for DockerRuntime {
 
         // Hardened host config — shared-kernel isolation, so drop everything we can. The agent
         // writes only to stdout; a /tmp tmpfs lets the rootfs stay read-only.
-        let tmpfs = HashMap::from([("/tmp".to_owned(), String::new())]);
+        let mut tmpfs = HashMap::from([("/tmp".to_owned(), String::new())]);
+        // The agent team clones a repo and adds a worktree per developer, so it needs
+        // somewhere writable. A sized tmpfs keeps the rootfs read-only and leaves
+        // nothing behind on the host when the container goes away.
+        if self.config.agent_runtime.needs_workspace() {
+            tmpfs.insert(
+                "/workspace".to_owned(),
+                format!("size={}m,exec", self.config.workspace_mib),
+            );
+        }
         let host_config = HostConfig {
             nano_cpus: Some(i64::from(spec.vcpus) * 1_000_000_000),
             memory: Some(i64::from(spec.mem_mib) * 1024 * 1024),
@@ -139,12 +159,22 @@ impl VmRuntime for DockerRuntime {
             tmpfs: Some(tmpfs),
             ..Default::default()
         };
+        let mut env = vec![
+            format!("WIAB_AGENT_ID={}", spec.agent_id),
+            format!("WIAB_MODEL_ENDPOINT={}", self.config.model_endpoint),
+        ];
+        // Forward the agent team's own configuration (models, effort, credentials)
+        // straight through from the backend's environment.
+        if self.config.agent_runtime == AgentRuntime::LangGraph {
+            env.extend(
+                langgraph_env()
+                    .into_iter()
+                    .map(|(key, value)| format!("{key}={value}")),
+            );
+        }
         let body = ContainerCreateBody {
             image: Some(image.clone()),
-            env: Some(vec![
-                format!("WIAB_AGENT_ID={}", spec.agent_id),
-                format!("WIAB_MODEL_ENDPOINT={}", self.config.model_endpoint),
-            ]),
+            env: Some(env),
             host_config: Some(host_config),
             ..Default::default()
         };

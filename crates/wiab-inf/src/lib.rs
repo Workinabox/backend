@@ -1,4 +1,5 @@
 pub mod agent_audio_transport;
+pub mod agent_runtime;
 pub mod app_state;
 pub mod credential_crypto;
 pub mod docker_runtime;
