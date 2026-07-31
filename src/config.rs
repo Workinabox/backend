@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use wiab_inf::{DockerConfig, FirecrackerConfig, LlamaConfig, MediaConfig};
+use wiab_inf::{DockerConfig, FirecrackerConfig, LlamaConfig, MediaConfig, NatsConfig};
 
 use crate::Cli;
 
@@ -19,6 +19,8 @@ use crate::Cli;
 pub struct AppConfig {
     pub serve: ServeConfig,
     pub vm: VmConfig,
+    /// Message broker. `None` unless `WIAB_NATS_ENABLED` is set.
+    pub nats: Option<NatsConfig>,
     pub auth: AuthConfig,
     pub email: EmailConfig,
     pub dev: DevConfig,
@@ -113,6 +115,11 @@ impl AppConfig {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| std::env::temp_dir().join("wiab-git")),
                 rust_log: env_or("RUST_LOG", "wiab=info,tower_http=info"),
+            },
+            nats: if env_flag("WIAB_NATS_ENABLED") {
+                Some(NatsConfig::from_env())
+            } else {
+                None
             },
             vm: VmConfig {
                 firecracker_enabled: env_flag("WIAB_FIRECRACKER_ENABLED"),
