@@ -13,9 +13,9 @@ use wiab_app::{
     AddDoneRequest, AddSshKeyRequest, CommitChangesRequest, CreateAgentRequest, CreateBoardRequest,
     CreateMeetingRequest, CreateOrganizationRequest, CreatePipelineRequest, CreateProjectRequest,
     CreateRepoRequest, CreateUserRequest, CreateWorkRequest, GrantRoleRequest, IssueTokenRequest,
-    IssuedTokenSnapshot, SetVisibilityRequest, UpdateAgentRequest, UpdateBoardRequest,
-    UpdateOrganizationRequest, UpdatePipelineRequest, UpdateProjectRequest, UpdateRepoRequest,
-    UpdateWorkRequest,
+    IssuedTokenSnapshot, MergePullRequestRequest, OpenPullRequestRequest, SetVisibilityRequest,
+    UpdateAgentRequest, UpdateBoardRequest, UpdateOrganizationRequest, UpdatePipelineRequest,
+    UpdateProjectRequest, UpdateRepoRequest, UpdateWorkRequest,
 };
 use wiab_core::access::{Operation, Role, RoleAssignmentSnapshot, Scope};
 use wiab_core::agent::{AgentId, AgentSnapshot};
@@ -25,6 +25,7 @@ use wiab_core::organization::OrganizationId;
 use wiab_core::organization::OrganizationSnapshot;
 use wiab_core::pipeline::PipelineSnapshot;
 use wiab_core::project::ProjectSnapshot;
+use wiab_core::pull_request::PullRequestSnapshot;
 use wiab_core::repo::{BranchSnapshot, CommitSnapshot, FileEntrySnapshot, RepoId, RepoSnapshot};
 use wiab_core::user::{TokenScope, UserId, UserSnapshot};
 use wiab_core::work::WorkSnapshot;
@@ -94,6 +95,19 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/repos/{repo_id}/commits", post(create_commit))
         .route("/repos/{repo_id}/visibility", put(set_repo_visibility))
+        .route(
+            "/repos/{repo_id}/pull-requests",
+            get(list_pull_requests).post(open_pull_request),
+        )
+        .route("/pull-requests/{pull_request_id}", get(get_pull_request))
+        .route(
+            "/pull-requests/{pull_request_id}/close",
+            post(close_pull_request),
+        )
+        .route(
+            "/pull-requests/{pull_request_id}/merge",
+            post(merge_pull_request),
+        )
         // Identity & access management.
         .route("/users", get(list_users).post(create_user))
         .route("/users/{user_id}", get(get_user))
@@ -678,6 +692,83 @@ async fn list_repo_commits(
     }
 }
 
+async fn list_pull_requests(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PullRequestSnapshot>>, (StatusCode, String)> {
+    require_repo_role(&state, &repo_id, Operation::Read, &headers).await?;
+    let service = state.pull_request_service.clone();
+    match service.list_by_repo(&repo_id).await.map_err(bad_request)? {
+        Some(pull_requests) => Ok(Json(pull_requests)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn open_pull_request(
+    State(state): State<AppState>,
+    Path(repo_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<OpenPullRequestRequest>,
+) -> Result<Json<PullRequestSnapshot>, (StatusCode, String)> {
+    // The author is the caller, so the user id is needed alongside the role check.
+    let (author, _scope) = authenticate(&state, &headers).await?;
+    require_repo_role(&state, &repo_id, Operation::Write, &headers).await?;
+    let service = state.pull_request_service.clone();
+    match service
+        .open(&repo_id, &author.to_string(), request)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(pull_request) => Ok(Json(pull_request)),
+        None => Err(not_found("repo", &repo_id)),
+    }
+}
+
+async fn get_pull_request(
+    State(state): State<AppState>,
+    Path(pull_request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<PullRequestSnapshot>, (StatusCode, String)> {
+    require_pull_request_repo_role(&state, &pull_request_id, Operation::Read, &headers).await?;
+    let service = state.pull_request_service.clone();
+    match service.get(&pull_request_id).await.map_err(bad_request)? {
+        Some(pull_request) => Ok(Json(pull_request)),
+        None => Err(not_found("pull request", &pull_request_id)),
+    }
+}
+
+async fn close_pull_request(
+    State(state): State<AppState>,
+    Path(pull_request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<PullRequestSnapshot>, (StatusCode, String)> {
+    require_pull_request_repo_role(&state, &pull_request_id, Operation::Write, &headers).await?;
+    let service = state.pull_request_service.clone();
+    match service.close(&pull_request_id).await.map_err(bad_request)? {
+        Some(pull_request) => Ok(Json(pull_request)),
+        None => Err(not_found("pull request", &pull_request_id)),
+    }
+}
+
+async fn merge_pull_request(
+    State(state): State<AppState>,
+    Path(pull_request_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<MergePullRequestRequest>,
+) -> Result<Json<PullRequestSnapshot>, (StatusCode, String)> {
+    require_pull_request_repo_role(&state, &pull_request_id, Operation::Write, &headers).await?;
+    let service = state.pull_request_service.clone();
+    match service
+        .merge(&pull_request_id, request)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(pull_request) => Ok(Json(pull_request)),
+        None => Err(not_found("pull request", &pull_request_id)),
+    }
+}
+
 async fn create_commit(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
@@ -945,6 +1036,26 @@ async fn require_repo_role(
         .await
         .map_err(internal)?;
     if allowed { Ok(()) } else { Err(forbidden()) }
+}
+
+/// Requires the caller hold `operation` on the repo that owns a pull request. 404 if the
+/// request is unknown. Used by the handlers that address a pull request by id, which carry
+/// no repo id of their own.
+async fn require_pull_request_repo_role(
+    state: &AppState,
+    pull_request_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(pull_request) = state
+        .pull_request_service
+        .get(pull_request_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("pull request", pull_request_id));
+    };
+    require_repo_role(state, &pull_request.repo_id, operation, headers).await
 }
 
 /// Requires the caller hold `operation` on the org that owns a project. 404 if the project is

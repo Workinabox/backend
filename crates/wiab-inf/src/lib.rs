@@ -1,4 +1,5 @@
 pub mod agent_audio_transport;
+pub mod agent_runtime;
 pub mod app_state;
 pub mod credential_crypto;
 pub mod docker_runtime;
@@ -19,6 +20,8 @@ pub mod in_memory_pipeline_numbering;
 pub mod in_memory_pipeline_repository;
 pub mod in_memory_project_numbering;
 pub mod in_memory_project_repository;
+pub mod in_memory_pull_request_numbering;
+pub mod in_memory_pull_request_repository;
 pub mod in_memory_repo_numbering;
 pub mod in_memory_repo_repository;
 pub mod in_memory_role_assignment_numbering;
@@ -38,6 +41,7 @@ pub mod postgres_board_repository;
 pub mod postgres_organization_repository;
 pub mod postgres_pipeline_repository;
 pub mod postgres_project_repository;
+pub mod postgres_pull_request_repository;
 pub mod postgres_repo_repository;
 pub mod postgres_role_assignment_repository;
 pub mod postgres_user_repository;
@@ -74,6 +78,8 @@ pub use in_memory_pipeline_numbering::InMemoryPipelineNumbering;
 pub use in_memory_pipeline_repository::InMemoryPipelineRepository;
 pub use in_memory_project_numbering::InMemoryProjectNumbering;
 pub use in_memory_project_repository::InMemoryProjectRepository;
+pub use in_memory_pull_request_numbering::InMemoryPullRequestNumbering;
+pub use in_memory_pull_request_repository::InMemoryPullRequestRepository;
 pub use in_memory_repo_numbering::InMemoryRepoNumbering;
 pub use in_memory_repo_repository::InMemoryRepoRepository;
 pub use in_memory_role_assignment_numbering::InMemoryRoleAssignmentNumbering;
@@ -90,13 +96,14 @@ pub use postgres_board_repository::PostgresBoardRepository;
 pub use postgres_organization_repository::PostgresOrganizationRepository;
 pub use postgres_pipeline_repository::PostgresPipelineRepository;
 pub use postgres_project_repository::PostgresProjectRepository;
+pub use postgres_pull_request_repository::PostgresPullRequestRepository;
 pub use postgres_repo_repository::PostgresRepoRepository;
 pub use postgres_role_assignment_repository::PostgresRoleAssignmentRepository;
 pub use postgres_user_repository::PostgresUserRepository;
 pub use postgres_vm_repository::PostgresVmRepository;
 pub use postgres_work_repository::PostgresWorkRepository;
 pub use repository_dispatch::{
-    AgentRepo, BoardRepo, OrganizationRepo, PipelineRepo, ProjectRepo, RepoRepo,
+    AgentRepo, BoardRepo, OrganizationRepo, PipelineRepo, ProjectRepo, PullRequestRepo, RepoRepo,
     RoleAssignmentRepo, UserRepo, VmRepo, WorkRepo,
 };
 pub use sfu::{MediaConfig, Sfu, handle_signal_socket};

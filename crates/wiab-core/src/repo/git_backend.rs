@@ -55,4 +55,21 @@ pub trait GitBackend: Send + Sync + 'static {
         message: &str,
         changes: Vec<FileChange>,
     ) -> Result<CommitHash, GitBackendError>;
+
+    /// Integrate the tip of `source` into `target` as a merge commit, moving the `target`
+    /// ref to it. Returns the new commit's hash.
+    ///
+    /// Fails with [`GitBackendError::MergeConflict`] when the three-way merge does not
+    /// resolve cleanly, leaving the repository untouched — a half-merged target ref would
+    /// be worse than a rejected merge.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_branch(
+        &self,
+        id: &RepoId,
+        source: &BranchName,
+        target: &BranchName,
+        author_name: &str,
+        author_email: &str,
+        message: &str,
+    ) -> Result<CommitHash, GitBackendError>;
 }

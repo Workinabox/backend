@@ -17,9 +17,14 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use wiab_app::{RuntimeHandle, VmRuntime, VmRuntimeError, VmSpec};
 
+use crate::agent_runtime::{AgentRuntime, langgraph_env};
+
 /// Filesystem + network layout, read from env with defaults matching the IaC.
 #[derive(Clone, Debug)]
 pub struct FirecrackerConfig {
+    /// Which agent runs in the guest. Selects what goes onto the agent drive; the
+    /// guest image supplies the matching systemd unit.
+    pub agent_runtime: AgentRuntime,
     /// Holds `base.ext4`, `developer.ext4`, `vmlinux`, `initramfs` (pulled by wiab-deploy).
     pub images_dir: PathBuf,
     /// Per-instance working dirs (`<vms_dir>/<vm-id>/`).
@@ -57,6 +62,7 @@ impl FirecrackerConfig {
             .map(|(head, _)| head.to_owned())
             .unwrap_or_else(|| "172.16.0".to_owned());
         Self {
+            agent_runtime: AgentRuntime::from_env(),
             images_dir: get("WIAB_IMAGES_DIR", "/var/lib/wiab/images").into(),
             vms_dir: get("WIAB_VMS_DIR", "/var/lib/wiab/vms").into(),
             agent_dir: get("WIAB_AGENT_DIR", "/var/lib/wiab/agent").into(),
@@ -165,7 +171,12 @@ impl FirecrackerRuntime {
         run(Command::new("mkfs.ext4").args(["-F", &path.to_string_lossy()])).await
     }
 
-    /// Build the read-only agent drive: a tiny ext4 holding `wiab-agent` + `agent.env`.
+    /// Build the read-only agent drive: a tiny ext4 holding `agent.env`, plus the
+    /// `wiab-agent` binary when that is the configured runtime.
+    ///
+    /// The agent team is not a single binary, so for `langgraph` the drive carries
+    /// only the environment; the guest image supplies the interpreter, the package,
+    /// and the systemd unit that starts it.
     async fn build_agent_drive(
         &self,
         stage: &std::path::Path,
@@ -174,15 +185,22 @@ impl FirecrackerRuntime {
     ) -> Result<(), VmRuntimeError> {
         let ioerr = |e: std::io::Error| VmRuntimeError::Runtime(format!("agent drive io: {e}"));
         std::fs::create_dir_all(stage).map_err(ioerr)?;
-        std::fs::copy(
-            self.config.agent_dir.join("wiab-agent"),
-            stage.join("wiab-agent"),
-        )
-        .map_err(ioerr)?;
-        let env = format!(
+        if self.config.agent_runtime == AgentRuntime::Rust {
+            std::fs::copy(
+                self.config.agent_dir.join("wiab-agent"),
+                stage.join("wiab-agent"),
+            )
+            .map_err(ioerr)?;
+        }
+        let mut env = format!(
             "WIAB_AGENT_ID={}\nWIAB_MODEL_ENDPOINT={}\n",
             spec.agent_id, self.config.model_endpoint
         );
+        if self.config.agent_runtime == AgentRuntime::LangGraph {
+            for (key, value) in langgraph_env() {
+                env.push_str(&format!("{key}={value}\n"));
+            }
+        }
         std::fs::write(stage.join("agent.env"), env).map_err(ioerr)?;
         // mke2fs -d populates directly from the staging dir (no mount/root).
         run(Command::new("truncate").args(["-s", "64M", &out.to_string_lossy()])).await?;

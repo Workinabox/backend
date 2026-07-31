@@ -268,6 +268,62 @@ impl GitBackend for Git2Backend {
         CommitHash::new(commit_oid.to_string())
             .map_err(|_| GitBackendError::Backend("git produced an invalid commit hash".to_owned()))
     }
+
+    fn merge_branch(
+        &self,
+        id: &RepoId,
+        source: &BranchName,
+        target: &BranchName,
+        author_name: &str,
+        author_email: &str,
+        message: &str,
+    ) -> Result<CommitHash, GitBackendError> {
+        let repo = self.open(id)?;
+        let source_commit = branch_commit(&repo, source)?;
+        let target_commit = branch_commit(&repo, target)?;
+
+        // Already integrated: nothing to merge, and a merge commit here would be noise.
+        // Report the target's existing tip so the caller records a real hash.
+        if repo
+            .graph_descendant_of(target_commit.id(), source_commit.id())
+            .map_err(backend)?
+        {
+            return CommitHash::new(target_commit.id().to_string()).map_err(|_| {
+                GitBackendError::Backend("git produced an invalid commit hash".to_owned())
+            });
+        }
+
+        // merge_commits does the three-way merge in memory, so a bare repo needs no
+        // worktree and a conflict leaves nothing on disk to clean up.
+        let mut index = repo
+            .merge_commits(&target_commit, &source_commit, None)
+            .map_err(backend)?;
+        if index.has_conflicts() {
+            return Err(GitBackendError::MergeConflict {
+                source_branch: source.as_str().to_owned(),
+                target_branch: target.as_str().to_owned(),
+            });
+        }
+
+        let tree_oid = index.write_tree_to(&repo).map_err(backend)?;
+        let tree = repo.find_tree(tree_oid).map_err(backend)?;
+        let signature = Signature::now(author_name, author_email).map_err(backend)?;
+        // Always a merge commit, even where a fast-forward would do: one code path, and
+        // the history explicitly records that the change arrived via a pull request.
+        let commit_oid = repo
+            .commit(
+                Some(&format!("refs/heads/{}", target.as_str())),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &[&target_commit, &source_commit],
+            )
+            .map_err(backend)?;
+
+        CommitHash::new(commit_oid.to_string())
+            .map_err(|_| GitBackendError::Backend("git produced an invalid commit hash".to_owned()))
+    }
 }
 
 #[cfg(test)]
@@ -292,6 +348,235 @@ mod tests {
             path: path.to_owned(),
             content: content.to_vec(),
         }
+    }
+
+    fn branch(name: &str) -> BranchName {
+        BranchName::new(name).unwrap()
+    }
+
+    /// A repo with `main` seeded, plus a `feature` branch cut from it, each having
+    /// changed a different file — so the two merge cleanly.
+    fn backend_with_divergent_branches() -> (TempDir, Git2Backend, RepoId) {
+        let (dir, backend, id) = backend_with_repo();
+        backend
+            .commit_changes(
+                &id,
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "seed",
+                vec![change("README.md", b"seed")],
+            )
+            .unwrap();
+        // Cut `feature` from main's tip by committing onto it from main's tree.
+        let repo = Repository::open_bare(dir.path().join("R-7.git")).unwrap();
+        let tip = repo.find_reference("refs/heads/main").unwrap();
+        let tip = tip.peel_to_commit().unwrap();
+        repo.reference("refs/heads/feature", tip.id(), true, "cut")
+            .unwrap();
+        backend
+            .commit_changes(
+                &id,
+                &branch("feature"),
+                "Grace",
+                "grace@example.com",
+                "feature work",
+                vec![change("feature.txt", b"from feature")],
+            )
+            .unwrap();
+        backend
+            .commit_changes(
+                &id,
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "main work",
+                vec![change("main.txt", b"from main")],
+            )
+            .unwrap();
+        (dir, backend, id)
+    }
+
+    #[test]
+    fn merge_branch_creates_a_two_parent_commit_and_moves_the_target() {
+        let (dir, backend, id) = backend_with_divergent_branches();
+        let merged = backend
+            .merge_branch(
+                &id,
+                &branch("feature"),
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "Merge PR-1",
+            )
+            .unwrap();
+
+        let repo = Repository::open_bare(dir.path().join("R-7.git")).unwrap();
+        let tip = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        assert_eq!(tip.id().to_string(), merged.as_str());
+        assert_eq!(tip.parent_count(), 2);
+
+        // Both sides' files are present at the merged tip.
+        for path in ["main.txt", "feature.txt"] {
+            assert!(
+                backend.read_file(&id, &main_branch(), path).is_ok(),
+                "{path} should be present after the merge"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_branch_reports_a_conflict_and_leaves_the_target_untouched() {
+        let (dir, backend, id) = backend_with_repo();
+        backend
+            .commit_changes(
+                &id,
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "seed",
+                vec![change("shared.txt", b"base")],
+            )
+            .unwrap();
+        let repo = Repository::open_bare(dir.path().join("R-7.git")).unwrap();
+        let tip = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        repo.reference("refs/heads/feature", tip.id(), true, "cut")
+            .unwrap();
+        // Both branches change the same file differently.
+        backend
+            .commit_changes(
+                &id,
+                &branch("feature"),
+                "Grace",
+                "grace@example.com",
+                "feature edit",
+                vec![change("shared.txt", b"from feature")],
+            )
+            .unwrap();
+        backend
+            .commit_changes(
+                &id,
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "main edit",
+                vec![change("shared.txt", b"from main")],
+            )
+            .unwrap();
+        let before = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        let error = backend
+            .merge_branch(
+                &id,
+                &branch("feature"),
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "Merge PR-1",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            GitBackendError::MergeConflict {
+                source_branch: "feature".to_owned(),
+                target_branch: "main".to_owned(),
+            }
+        );
+        let after = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        assert_eq!(before, after, "a conflict must not move the target ref");
+        assert_eq!(
+            backend
+                .read_file(&id, &main_branch(), "shared.txt")
+                .unwrap(),
+            b"from main".to_vec()
+        );
+    }
+
+    #[test]
+    fn merging_an_already_integrated_branch_adds_no_commit() {
+        let (dir, backend, id) = backend_with_repo();
+        backend
+            .commit_changes(
+                &id,
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "seed",
+                vec![change("README.md", b"seed")],
+            )
+            .unwrap();
+        let repo = Repository::open_bare(dir.path().join("R-7.git")).unwrap();
+        let tip = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        repo.reference("refs/heads/stale", tip.id(), true, "cut")
+            .unwrap();
+        backend
+            .commit_changes(
+                &id,
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "moves on",
+                vec![change("later.txt", b"later")],
+            )
+            .unwrap();
+        let before = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        let merged = backend
+            .merge_branch(
+                &id,
+                &branch("stale"),
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "Merge PR-1",
+            )
+            .unwrap();
+
+        assert_eq!(merged.as_str(), before.to_string());
+    }
+
+    #[test]
+    fn merge_branch_rejects_an_unknown_branch() {
+        let (_dir, backend, id) = backend_with_divergent_branches();
+        let error = backend
+            .merge_branch(
+                &id,
+                &branch("nope"),
+                &main_branch(),
+                "Ada",
+                "ada@example.com",
+                "Merge",
+            )
+            .unwrap_err();
+        assert_eq!(error, GitBackendError::BranchNotFound("nope".to_owned()));
     }
 
     #[test]

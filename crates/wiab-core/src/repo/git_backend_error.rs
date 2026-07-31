@@ -14,6 +14,13 @@ pub enum GitBackendError {
     PathNotFound(String),
     #[error("path '{0}' is not a file")]
     NotAFile(String),
+    // Field names avoid `source`: thiserror reads a field of that name as the error's
+    // underlying cause, which a plain String is not.
+    #[error("merging '{source_branch}' into '{target_branch}' produced conflicts")]
+    MergeConflict {
+        source_branch: String,
+        target_branch: String,
+    },
     #[error("git backend error: {0}")]
     Backend(String),
 }
