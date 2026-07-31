@@ -16,9 +16,9 @@ use wiab_app::{
 };
 
 use crate::{
-    AgentRepo, BoardRepo, InMemoryMeetingRepository, OrganizationRepo, PipelineRepo, ProjectRepo,
-    PullRequestRepo, RepoRepo, RoleAssignmentRepo, Sfu, UserRepo, VmRepo, VmRuntimeDispatch,
-    WiabUserDirectory, WorkRepo,
+    AgentRepo, BoardRepo, InMemoryMeetingRepository, MessagingDispatch, OrganizationRepo,
+    PipelineRepo, ProjectRepo, PullRequestRepo, RepoRepo, RoleAssignmentRepo, Sfu, UserRepo,
+    VmRepo, VmRuntimeDispatch, WiabUserDirectory, WorkRepo,
 };
 
 /// The fully-resolved vm application service (its runtime is chosen at boot — see bootstrap).
@@ -84,6 +84,8 @@ pub struct AppState {
     pub authorization_service: Arc<AuthorizationService<RoleAssignmentRepo, RepoRepo, ProjectRepo>>,
     pub pipeline_service: Arc<PipelineApplicationService<PipelineRepo, ProjectRepo>>,
     pub work_service: Arc<WorkApplicationService<WorkRepo, ProjectRepo>>,
+    /// Message broker. Shared so any service can publish; `Disabled` when NATS is off.
+    pub messaging: Arc<MessagingDispatch>,
     pub sfu: Arc<Sfu>,
     /// HTTP auth configuration (cookie flags, enabled login methods).
     pub auth_settings: AuthSettings,

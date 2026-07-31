@@ -47,13 +47,14 @@ use wiab_inf::{
     InMemoryPullRequestNumbering, InMemoryPullRequestRepository, InMemoryRepoNumbering,
     InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
     InMemoryUserNumbering, InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository,
-    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, OrganizationRepo,
-    PipelineRepo, PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
-    PostgresPipelineRepository, PostgresProjectRepository, PostgresPullRequestRepository,
-    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresUserRepository,
-    PostgresVmRepository, PostgresWorkRepository, ProjectRepo, PullRequestRepo, RandomTokenFactory,
-    RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock,
-    UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
+    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, MessagingDispatch,
+    NatsMessaging, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
+    PostgresProjectRepository, PostgresPullRequestRepository, PostgresRepoRepository,
+    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresVmRepository,
+    PostgresWorkRepository, ProjectRepo, PullRequestRepo, RandomTokenFactory, RepoRepo,
+    RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo,
+    VmRepo, VmRuntimeDispatch, WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
@@ -94,6 +95,16 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         other => anyhow::bail!(
             "unsupported persistence value '{other}' (expected 'memory' or 'postgres')"
         ),
+    };
+
+    // Opt-in: an existing deployment without a broker keeps working, and `Disabled`
+    // makes a publish fail loudly rather than look like it succeeded.
+    let messaging = match &config.nats {
+        Some(nats) => MessagingDispatch::Nats(NatsMessaging::connect(nats).await?),
+        None => {
+            info!("messaging: disabled (set WIAB_NATS_ENABLED to publish)");
+            MessagingDispatch::Disabled
+        }
     };
 
     let organization_repo = match &pool {
@@ -501,6 +512,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         project_service,
         agent_service,
         board_service,
+        messaging: Arc::new(messaging),
         pull_request_service,
         repo_service,
         user_service,
