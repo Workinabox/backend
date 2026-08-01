@@ -251,6 +251,12 @@ impl<
         if let Some(vm_id) = team.vm_id() {
             self.vm.stop(&vm_id.to_string()).await?;
         }
+        // The container is gone, so its token has no legitimate user left. Revoking is
+        // best-effort: a token we could not withdraw must not block the stop, or a team
+        // would be stuck running because of a bookkeeping failure.
+        if let Err(error) = self.identity.revoke_tokens(team.user_id()).await {
+            tracing::warn!("could not revoke tokens for team {team_id}: {error}");
+        }
         self.mutate(&id, |team| {
             team.stop();
             Ok(())
@@ -457,6 +463,8 @@ mod tests {
     struct StubTeamIdentity {
         tokens: RwLock<Vec<String>>,
         granted: RwLock<Vec<(String, String)>>,
+        revoked: RwLock<Vec<String>>,
+        revoke_fails: RwLock<bool>,
     }
 
     impl TeamIdentity for StubTeamIdentity {
@@ -482,6 +490,17 @@ mod tests {
             let token = format!("tok-{}", tokens.len() + 1);
             tokens.push(token.clone());
             Ok(token)
+        }
+
+        async fn revoke_tokens(&self, user_id: UserId) -> anyhow::Result<()> {
+            if *self.revoke_fails.read().expect("test read lock poisoned") {
+                return Err(anyhow!("the user store is down"));
+            }
+            self.revoked
+                .write()
+                .expect("test write lock poisoned")
+                .push(user_id.to_string());
+            Ok(())
         }
     }
 
@@ -890,5 +909,34 @@ mod tests {
             service.identity.granted.read().unwrap().as_slice(),
             [("TM-1".to_owned(), "platform@O-1".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn stopping_revokes_the_team_s_tokens() {
+        // The container is gone, so its token has no legitimate user left.
+        let service = service();
+        let organization_id = seed_organization(&service, 1).await;
+        create(&service, &organization_id, "platform").await;
+        service.start_team("TM-1").await.unwrap();
+        service.stop_team("TM-1").await.unwrap();
+
+        assert_eq!(service.identity.revoked.read().unwrap().as_slice(), ["U-9"]);
+    }
+
+    #[tokio::test]
+    async fn a_token_that_cannot_be_revoked_does_not_block_the_stop() {
+        // Otherwise a team would be stuck running because of a bookkeeping failure.
+        let service = service();
+        let organization_id = seed_organization(&service, 1).await;
+        create(&service, &organization_id, "platform").await;
+        service.start_team("TM-1").await.unwrap();
+        *service
+            .identity
+            .revoke_fails
+            .write()
+            .expect("test write lock poisoned") = true;
+
+        let stopped = service.stop_team("TM-1").await.unwrap().unwrap();
+        assert_eq!(stopped.state, "stopped");
     }
 }
