@@ -22,9 +22,14 @@ use crate::vm_requests::ProvisionVmRequest;
 ///
 /// The token is minted fresh for this container and never stored, so a credential lives only
 /// as long as the container it was issued to.
-fn worker_env(team: &TeamSnapshot, api_url: &str, token: &str) -> Vec<(String, String)> {
+fn worker_env(
+    team: &TeamSnapshot,
+    api_url: &str,
+    token: &str,
+    certificate_pem: Option<&str>,
+) -> Vec<(String, String)> {
     let api_url = api_url.trim_end_matches('/');
-    vec![
+    let mut env = vec![
         ("WIAB_TEAM_API_URL".to_owned(), api_url.to_owned()),
         ("WIAB_TEAM_TEAM_ID".to_owned(), team.id.clone()),
         ("WIAB_TEAM_BOARD_ID".to_owned(), team.board_id.clone()),
@@ -33,7 +38,16 @@ fn worker_env(team: &TeamSnapshot, api_url: &str, token: &str) -> Vec<(String, S
             format!("{api_url}/repos/{}.git", team.repo_id),
         ),
         ("WIAB_TEAM_API_TOKEN".to_owned(), token.to_owned()),
-    ]
+        // The same credential authenticates the git clone and push, as HTTP Basic's
+        // password. One token covers both halves of the work rather than two to manage.
+        ("WIAB_TEAM_GIT_TOKEN".to_owned(), token.to_owned()),
+    ];
+    // Without this a team cannot reach a backend using the generated certificate at all —
+    // which is the default — because nothing in the container trusts it.
+    if let Some(pem) = certificate_pem {
+        env.push(("WIAB_TEAM_API_CA_PEM".to_owned(), pem.to_owned()));
+    }
+    env
 }
 
 /// Orchestrates use cases over the `Team` aggregate — creation, and the start/pause/resume/stop
@@ -63,6 +77,9 @@ pub struct TeamApplicationService<
     /// Where the team's container reaches this backend. The container polls over HTTP, so it
     /// needs the public URL rather than the address the server happens to bind.
     api_url: String,
+    /// This backend's own TLS certificate, handed to the container so it can verify us.
+    /// `None` leaves the container on the system trust store.
+    certificate_pem: Option<String>,
 }
 
 impl<
@@ -86,6 +103,7 @@ impl<
         identity: I,
         numbering: Arc<dyn TeamNumbering>,
         api_url: String,
+        certificate_pem: Option<String>,
     ) -> Self {
         Self {
             team_repository,
@@ -96,6 +114,7 @@ impl<
             identity,
             numbering,
             api_url,
+            certificate_pem,
         }
     }
 
@@ -182,7 +201,12 @@ impl<
             template: team.vm_template.clone(),
             vcpus: None,
             mem_mib: None,
-            env: worker_env(&team, &self.api_url, &token),
+            env: worker_env(
+                &team,
+                &self.api_url,
+                &token,
+                self.certificate_pem.as_deref(),
+            ),
         };
         let vm = match self
             .vm
@@ -545,6 +569,7 @@ mod tests {
             StubTeamIdentity::default(),
             Arc::new(TestTeamNumbering::default()),
             API_URL.to_owned(),
+            Some("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_owned()),
         )
     }
 
@@ -799,6 +824,11 @@ mod tests {
         );
         // The token is minted for this container, never stored.
         assert_eq!(value("WIAB_TEAM_API_TOKEN"), "tok-1");
+        // Without the certificate the container cannot verify a backend using the
+        // generated one, which is the default.
+        assert!(value("WIAB_TEAM_API_CA_PEM").contains("BEGIN CERTIFICATE"));
+        // The same credential covers the queue and the code.
+        assert_eq!(value("WIAB_TEAM_GIT_TOKEN"), "tok-1");
     }
 
     #[test]
@@ -815,7 +845,7 @@ mod tests {
             state: "starting".to_owned(),
             vm_id: None,
         };
-        let env = worker_env(&team, "https://wiab.example/", "tok");
+        let env = worker_env(&team, "https://wiab.example/", "tok", None);
         let value = |key: &str| {
             env.iter()
                 .find(|(k, _)| k == key)
@@ -827,6 +857,8 @@ mod tests {
             value("WIAB_TEAM_REPO_REMOTE"),
             "https://wiab.example/repos/R-3.git"
         );
+        // Nothing to trust beyond the system store, so nothing is passed.
+        assert!(!env.iter().any(|(key, _)| key == "WIAB_TEAM_API_CA_PEM"));
     }
 
     #[tokio::test]

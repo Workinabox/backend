@@ -84,7 +84,11 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let state = bootstrap::build_app_state(&config).await?;
+    // TLS first: the server's own certificate is handed to team containers so they can
+    // verify it, and that has to be known before the services that pass it are built.
+    let (tls, certificate_pem) = load_tls_config(&config.serve, &config.auth.base_url).await?;
+
+    let state = bootstrap::build_app_state(&config, certificate_pem).await?;
 
     // Git SSH transport runs on its own port alongside the HTTPS server.
     let ssh_addr = config.serve.git_ssh_addr.clone();
@@ -103,7 +107,6 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = "0.0.0.0:8080"
         .parse()
         .context("invalid backend bind address")?;
-    let tls = load_tls_config(&config.serve).await?;
     info!("wiab backend listening on https://{addr}");
 
     axum_server::bind_rustls(addr, tls)
@@ -117,28 +120,88 @@ async fn main() -> anyhow::Result<()> {
 /// Loads the TLS cert/key from `WIAB_TLS_CERT`/`WIAB_TLS_KEY` (PEM), or generates a
 /// self-signed cert. The backend always serves HTTPS; a reverse proxy connects to it over
 /// TLS (with verification disabled for the self-signed case).
-async fn load_tls_config(serve: &ServeConfig) -> anyhow::Result<RustlsConfig> {
+///
+/// Also returns the server's certificate in PEM. Team containers are handed it so they can
+/// verify this backend rather than skip verification — without it a team cannot reach a
+/// backend using the generated certificate at all, which is the default.
+async fn load_tls_config(
+    serve: &ServeConfig,
+    base_url: &str,
+) -> anyhow::Result<(RustlsConfig, Option<String>)> {
     match (&serve.tls_cert, &serve.tls_key) {
-        (Some(cert), Some(key)) => RustlsConfig::from_pem_file(cert, key)
-            .await
-            .context("failed to load TLS cert/key"),
+        (Some(cert), Some(key)) => {
+            let pem = std::fs::read_to_string(cert)
+                .with_context(|| format!("failed to read TLS cert {cert}"))?;
+            let config = RustlsConfig::from_pem_file(cert, key)
+                .await
+                .context("failed to load TLS cert/key")?;
+            Ok((config, Some(pem)))
+        }
         _ => {
             warn!(
                 "WIAB_TLS_CERT/WIAB_TLS_KEY unset; generating a self-signed certificate \
                  (clients/proxies must skip verification or trust it)"
             );
-            let cert = rcgen::generate_simple_self_signed(vec![
-                "localhost".to_owned(),
-                "127.0.0.1".to_owned(),
-            ])
-            .context("failed to generate self-signed certificate")?;
-            RustlsConfig::from_pem(
-                cert.cert.pem().into_bytes(),
+            let cert = rcgen::generate_simple_self_signed(self_signed_names(base_url))
+                .context("failed to generate self-signed certificate")?;
+            let pem = cert.cert.pem();
+            let config = RustlsConfig::from_pem(
+                pem.clone().into_bytes(),
                 cert.key_pair.serialize_pem().into_bytes(),
             )
             .await
-            .context("failed to build TLS config from self-signed certificate")
+            .context("failed to build TLS config from self-signed certificate")?;
+            Ok((config, Some(pem)))
         }
+    }
+}
+
+/// Names the generated certificate must cover.
+///
+/// `localhost` and `127.0.0.1` for anything on the host, `host.docker.internal` because a
+/// team container reaches its backend by that name, and whatever host `WIAB_BASE_URL`
+/// advertises — a certificate that does not cover the name clients are told to use is no
+/// use to them.
+fn self_signed_names(base_url: &str) -> Vec<String> {
+    let mut names = vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+        "host.docker.internal".to_owned(),
+    ];
+    if let Some(host) = base_url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .map(|host| host.split(':').next().unwrap_or(host))
+        && !host.is_empty()
+        && !names.iter().any(|existing| existing == host)
+    {
+        names.push(host.to_owned());
+    }
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_certificate_covers_the_advertised_host() {
+        let names = self_signed_names("https://wiab.example.com:8080/");
+        assert!(names.contains(&"wiab.example.com".to_owned()));
+        assert!(names.contains(&"host.docker.internal".to_owned()));
+        assert!(names.contains(&"localhost".to_owned()));
+    }
+
+    #[test]
+    fn a_base_url_that_adds_nothing_is_not_duplicated() {
+        let names = self_signed_names("https://localhost:8080");
+        assert_eq!(names.iter().filter(|n| *n == "localhost").count(), 1);
+    }
+
+    #[test]
+    fn a_malformed_base_url_still_yields_the_defaults() {
+        assert_eq!(self_signed_names("not-a-url").len(), 3);
     }
 }
 

@@ -62,7 +62,12 @@ use wiab_inf::{
     WiabAuthService, WiabTeamIdentity, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
-pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
+/// `certificate_pem` is the server's own TLS certificate. Team containers are handed it so
+/// they can verify this backend; see `TeamApplicationService`.
+pub async fn build_app_state(
+    config: &crate::config::AppConfig,
+    certificate_pem: Option<String>,
+) -> anyhow::Result<AppState> {
     let persistence = &config.serve.persistence;
     let database_url = &config.serve.database_url;
     let seed_clock = SystemClock;
@@ -280,6 +285,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         WiabTeamIdentity::new(user_service.clone(), access_service.clone()),
         Arc::new(team_numbering),
         config.auth.base_url.clone(),
+        certificate_pem,
     ));
 
     let authorization_service = Arc::new(AuthorizationService::new(
