@@ -26,6 +26,8 @@ pub mod in_memory_repo_numbering;
 pub mod in_memory_repo_repository;
 pub mod in_memory_role_assignment_numbering;
 pub mod in_memory_role_assignment_repository;
+pub mod in_memory_task_numbering;
+pub mod in_memory_task_repository;
 pub mod in_memory_team_numbering;
 pub mod in_memory_team_repository;
 pub mod in_memory_user_numbering;
@@ -48,6 +50,7 @@ pub mod postgres_project_repository;
 pub mod postgres_pull_request_repository;
 pub mod postgres_repo_repository;
 pub mod postgres_role_assignment_repository;
+pub mod postgres_task_repository;
 pub mod postgres_team_repository;
 pub mod postgres_user_repository;
 pub mod postgres_vm_repository;
@@ -89,6 +92,8 @@ pub use in_memory_repo_numbering::InMemoryRepoNumbering;
 pub use in_memory_repo_repository::InMemoryRepoRepository;
 pub use in_memory_role_assignment_numbering::InMemoryRoleAssignmentNumbering;
 pub use in_memory_role_assignment_repository::InMemoryRoleAssignmentRepository;
+pub use in_memory_task_numbering::InMemoryTaskNumbering;
+pub use in_memory_task_repository::InMemoryTaskRepository;
 pub use in_memory_team_numbering::InMemoryTeamNumbering;
 pub use in_memory_team_repository::InMemoryTeamRepository;
 pub use in_memory_user_numbering::InMemoryUserNumbering;
@@ -108,13 +113,14 @@ pub use postgres_project_repository::PostgresProjectRepository;
 pub use postgres_pull_request_repository::PostgresPullRequestRepository;
 pub use postgres_repo_repository::PostgresRepoRepository;
 pub use postgres_role_assignment_repository::PostgresRoleAssignmentRepository;
+pub use postgres_task_repository::PostgresTaskRepository;
 pub use postgres_team_repository::PostgresTeamRepository;
 pub use postgres_user_repository::PostgresUserRepository;
 pub use postgres_vm_repository::PostgresVmRepository;
 pub use postgres_work_repository::PostgresWorkRepository;
 pub use repository_dispatch::{
     AgentRepo, BoardRepo, OrganizationRepo, PipelineRepo, ProjectRepo, PullRequestRepo, RepoRepo,
-    RoleAssignmentRepo, TeamRepo, UserRepo, VmRepo, WorkRepo,
+    RoleAssignmentRepo, TaskRepo, TeamRepo, UserRepo, VmRepo, WorkRepo,
 };
 pub use sfu::{MediaConfig, Sfu, handle_signal_socket};
 pub use speech_synthesizer::DefaultSpeechSynthesizer;

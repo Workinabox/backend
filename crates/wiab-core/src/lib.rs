@@ -10,6 +10,7 @@ pub mod project;
 pub mod pull_request;
 pub mod repo;
 pub mod repository;
+pub mod task;
 pub mod team;
 pub mod transcript;
 pub mod user;
