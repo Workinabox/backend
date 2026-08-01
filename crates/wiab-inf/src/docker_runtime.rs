@@ -172,6 +172,9 @@ impl VmRuntime for DockerRuntime {
                     .map(|(key, value)| format!("{key}={value}")),
             );
         }
+        // Owner-specific settings last, so a team's own board and repo win over anything the
+        // backend's environment happened to set.
+        env.extend(spec.env.iter().map(|(key, value)| format!("{key}={value}")));
         let body = ContainerCreateBody {
             image: Some(image.clone()),
             env: Some(env),

@@ -668,7 +668,12 @@ async fn create_team(
         .map_err(bad_request)?
     {
         Some(snapshot) => Ok(Json(snapshot)),
-        None => Err(not_found("organization", &organization_id)),
+        // The org, the board or the repo may be the missing one; saying "organization"
+        // would send the caller looking in the wrong place.
+        None => Err(not_found(
+            "organization, board or repo for organization",
+            &organization_id,
+        )),
     }
 }
 

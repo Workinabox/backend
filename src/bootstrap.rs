@@ -179,21 +179,6 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         Arc::new(agent_numbering),
     ));
 
-    let team_repo = match &pool {
-        Some(pool) => TeamRepo::Postgres(PostgresTeamRepository::new(pool.clone())),
-        None => TeamRepo::InMemory(InMemoryTeamRepository::new()),
-    };
-    let team_numbering =
-        InMemoryTeamNumbering::starting_at(next_after(&team_repo.list().await?, |team| {
-            team.id().number()
-        }));
-    let team_service = Arc::new(TeamApplicationService::new(
-        team_repo,
-        organization_repo.clone(),
-        vm_service,
-        Arc::new(team_numbering),
-    ));
-
     let board_repo = match &pool {
         Some(pool) => BoardRepo::Postgres(PostgresBoardRepository::new(pool.clone())),
         None => BoardRepo::InMemory(InMemoryBoardRepository::new()),
@@ -227,6 +212,24 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         project_repo.clone(),
         Arc::new(repo_numbering),
         git_backend.clone(),
+    ));
+
+    let team_repo = match &pool {
+        Some(pool) => TeamRepo::Postgres(PostgresTeamRepository::new(pool.clone())),
+        None => TeamRepo::InMemory(InMemoryTeamRepository::new()),
+    };
+    let team_numbering =
+        InMemoryTeamNumbering::starting_at(next_after(&team_repo.list().await?, |team| {
+            team.id().number()
+        }));
+    let team_service = Arc::new(TeamApplicationService::new(
+        team_repo,
+        organization_repo.clone(),
+        board_repo.clone(),
+        repo_repo.clone(),
+        vm_service,
+        Arc::new(team_numbering),
+        config.auth.base_url.clone(),
     ));
 
     let pull_request_repo = match &pool {

@@ -9,6 +9,7 @@
 use wiab_core::board::BoardId;
 use wiab_core::organization::{Organization, OrganizationId, OrganizationRepository};
 use wiab_core::project::ProjectId;
+use wiab_core::repo::RepoId;
 use wiab_core::repository::{SaveError, Version};
 use wiab_core::task::{Task, TaskId, TaskRepository, TaskState};
 use wiab_core::team::{Team, TeamId, TeamRepository, TeamState};
@@ -149,6 +150,8 @@ async fn postgres_persistence_end_to_end() {
         OrganizationId::from_number(1),
         "platform".into(),
         "the platform team".into(),
+        BoardId::from_number(1),
+        RepoId::from_number(7),
         VmTemplate::new("developer".to_owned()).unwrap(),
     )
     .unwrap();
