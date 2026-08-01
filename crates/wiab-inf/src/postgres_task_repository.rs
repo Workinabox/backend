@@ -57,8 +57,12 @@ fn task_from_row(row: &Row) -> Result<Task, RepoError> {
 const COLUMNS: &str = "id, board_id, work_id, state, assignee, reason";
 
 impl TaskRepository for PostgresTaskRepository {
-    async fn save(&self, task: Task, expected: Version) -> Result<Version, SaveError> {
-        let client = self.pool.get().await.map_err(save_error)?;
+    async fn save(&self, mut task: Task, expected: Version) -> Result<Version, SaveError> {
+        // One transaction for the row and the events it produced, so a committed change
+        // always has its events and a rolled-back one never does.
+        let events = task.take_events();
+        let mut client = self.pool.get().await.map_err(save_error)?;
+        let transaction = client.transaction().await.map_err(save_error)?;
         let id = task.id().to_string();
         let next = expected.next();
         let next_version = next.value() as i64;
@@ -68,7 +72,7 @@ impl TaskRepository for PostgresTaskRepository {
         let assignee = task.assignee().map(|id| id.to_string());
         let reason = task.reason().map(str::to_owned);
         let rows = if expected == Version::NEW {
-            client
+            transaction
                 .execute(
                     "INSERT INTO task \
                      (id, number, version, board_id, work_id, state, assignee, reason) \
@@ -87,7 +91,7 @@ impl TaskRepository for PostgresTaskRepository {
                 .await
                 .map_err(save_error)?
         } else {
-            client
+            transaction
                 .execute(
                     "UPDATE task SET version = $2, board_id = $3, work_id = $4, state = $5, \
                      assignee = $6, reason = $7 WHERE id = $1 AND version = $8",
@@ -108,6 +112,10 @@ impl TaskRepository for PostgresTaskRepository {
         if rows == 0 {
             return Err(SaveError::Conflict);
         }
+        crate::outbox_writes::append(&transaction, &events)
+            .await
+            .map_err(save_error)?;
+        transaction.commit().await.map_err(save_error)?;
         Ok(next)
     }
 
@@ -171,6 +179,9 @@ impl TaskRepository for PostgresTaskRepository {
         let mut task = task_from_row(&row)?;
         let version: i64 = row.get(6);
         task.assign(team_id).map_err(repo_error)?;
+        // The claim is its own transaction, so its event is written here rather than by
+        // save — a claimed task that published nothing would be invisible to consumers.
+        let events = task.take_events();
         let next = Version::from_value(version as u64).next();
         transaction
             .execute(
@@ -183,6 +194,9 @@ impl TaskRepository for PostgresTaskRepository {
                     &team_id.to_string(),
                 ],
             )
+            .await
+            .map_err(repo_error)?;
+        crate::outbox_writes::append(&transaction, &events)
             .await
             .map_err(repo_error)?;
         transaction.commit().await.map_err(repo_error)?;

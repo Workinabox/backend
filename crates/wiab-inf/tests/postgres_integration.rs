@@ -6,6 +6,7 @@
 //!   cargo test -p wiab-inf --test postgres_integration -- --ignored
 //! ```
 
+use wiab_app::Outbox;
 use wiab_core::board::BoardId;
 use wiab_core::organization::{Organization, OrganizationId, OrganizationRepository};
 use wiab_core::project::ProjectId;
@@ -18,7 +19,7 @@ use wiab_core::vm::{VmId, VmTemplate};
 use wiab_core::work::{Work, WorkId, WorkRepository};
 use wiab_inf::pg_pool;
 use wiab_inf::{
-    PostgresOrganizationRepository, PostgresTaskRepository, PostgresTeamRepository,
+    PostgresOrganizationRepository, PostgresOutbox, PostgresTaskRepository, PostgresTeamRepository,
     PostgresUserRepository, PostgresWorkRepository,
 };
 
@@ -47,7 +48,7 @@ async fn postgres_persistence_end_to_end() {
         .expect("client")
         .batch_execute(
             "TRUNCATE organization, project, agent, board, repo, pipeline, work, work_done, \
-             app_user, user_ssh_key, user_access_token, role_assignment, team, task",
+             app_user, user_ssh_key, user_access_token, role_assignment, team, task, outbox",
         )
         .await
         .expect("truncate");
@@ -229,6 +230,49 @@ async fn postgres_persistence_end_to_end() {
     assert_eq!(reclaimed.id(), claimed[0]);
     assert_eq!(reclaimed.assignee(), Some(TeamId::from_number(3)));
     assert_eq!(reclaimed.reason(), None, "the stale reason is cleared");
+
+    // --- Outbox: events land with the row that produced them, in one transaction. ---
+    let outbox = PostgresOutbox::new(pool.clone());
+    let waiting = outbox.pending(100).await.expect("read outbox");
+    let names: Vec<&str> = waiting.iter().map(|e| e.event.name.as_str()).collect();
+    // The team and task work above drove real transitions, so their events are here in the
+    // order they happened.
+    assert!(
+        names.contains(&"team.starting") && names.contains(&"team.started"),
+        "team lifecycle events were not written with the row: {names:?}"
+    );
+    assert!(
+        names.contains(&"task.assigned"),
+        "claiming a task wrote no event: {names:?}"
+    );
+    assert!(
+        waiting.windows(2).all(|pair| pair[0].id < pair[1].id),
+        "the outbox must come back in the order things happened"
+    );
+
+    // A rejected save writes nothing: the transaction that carried the events rolled back.
+    let before = outbox.pending(1000).await.unwrap().len();
+    let (mut conflicting, _) = teams.get(&TeamId::from_number(1)).await.unwrap().unwrap();
+    conflicting.stop();
+    assert!(matches!(
+        teams.save(conflicting, Version::NEW).await,
+        Err(SaveError::Conflict)
+    ));
+    assert_eq!(
+        outbox.pending(1000).await.unwrap().len(),
+        before,
+        "a conflicting save must not leave its events behind"
+    );
+
+    // Publishing forgets them.
+    let ids: Vec<i64> = waiting.iter().map(|entry| entry.id).collect();
+    outbox.mark_published(&ids).await.expect("mark published");
+    let remaining = outbox.pending(100).await.unwrap();
+    let left: Vec<&str> = remaining.iter().map(|e| e.event.name.as_str()).collect();
+    assert!(
+        !left.iter().any(|name| names.contains(name)),
+        "published events are still waiting: {left:?}"
+    );
 
     // --- Durability across a fresh pool (proxy for a process restart). ---
     drop(orgs);

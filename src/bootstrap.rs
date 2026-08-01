@@ -22,7 +22,7 @@ use wiab_app::{
     IssueTokenRequest, MeetingApplicationService, OrganizationApplicationService,
     PipelineApplicationService, ProjectApplicationService, PullRequestApplicationService,
     RepoApplicationService, TaskApplicationService, TeamApplicationService, UserApplicationService,
-    VmApplicationService, WorkApplicationService,
+    VmApplicationService, WorkApplicationService, run_publisher,
 };
 use wiab_core::{
     access::{Role, RoleAssignmentRepository, Scope},
@@ -53,17 +53,21 @@ use wiab_inf::{
     InMemoryUserNumbering, InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository,
     InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, MessagingDispatch,
     NatsMessaging, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
-    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
-    PostgresProjectRepository, PostgresPullRequestRepository, PostgresRepoRepository,
-    PostgresRoleAssignmentRepository, PostgresTaskRepository, PostgresTeamRepository,
-    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
-    PullRequestRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
-    Sha256TokenHasher, SystemClock, TaskRepo, TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch,
-    WiabAuthService, WiabTeamIdentity, WiabUserDirectory, WorkRepo, pg_pool,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresOutbox,
+    PostgresPipelineRepository, PostgresProjectRepository, PostgresPullRequestRepository,
+    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresTaskRepository,
+    PostgresTeamRepository, PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository,
+    ProjectRepo, PullRequestRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu,
+    Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, TaskRepo, TeamRepo, UserRepo, VmRepo,
+    VmRuntimeDispatch, WiabAuthService, WiabTeamIdentity, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 /// `certificate_pem` is the server's own TLS certificate. Team containers are handed it so
 /// they can verify this backend; see `TeamApplicationService`.
+/// How often the publisher checks the outbox. Events are for observing a team, not for
+/// driving it, so seconds of lag cost nothing and a tighter loop would just poll harder.
+const OUTBOX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub async fn build_app_state(
     config: &crate::config::AppConfig,
     certificate_pem: Option<String>,
@@ -116,6 +120,24 @@ pub async fn build_app_state(
             MessagingDispatch::Disabled
         }
     };
+
+    // Drain the outbox to the broker. Only with both a database to read from and a broker
+    // to publish to — either alone gives events nowhere to go, and a task looping over
+    // nothing is just noise in the logs.
+    match (&pool, &messaging) {
+        (Some(pool), MessagingDispatch::Nats(nats)) => {
+            let outbox = PostgresOutbox::new(pool.clone());
+            let nats: NatsMessaging = (*nats).clone();
+            tokio::spawn(async move {
+                run_publisher(outbox, nats, OUTBOX_INTERVAL).await;
+            });
+            info!(
+                "outbox publisher started ({}s interval)",
+                OUTBOX_INTERVAL.as_secs()
+            );
+        }
+        _ => info!("outbox publisher disabled (needs both postgres and nats)"),
+    }
 
     let organization_repo = match &pool {
         Some(pool) => OrganizationRepo::Postgres(PostgresOrganizationRepository::new(pool.clone())),

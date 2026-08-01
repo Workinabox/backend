@@ -54,7 +54,8 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
-tokio-postgres = "0.7"
+# with-serde_json-1: the outbox stores event payloads as JSONB.
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18", features = ["v4"] }
