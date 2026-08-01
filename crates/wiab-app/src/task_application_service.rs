@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use wiab_core::board::{BoardId, BoardRepository};
 use wiab_core::repository::{SaveError, Version};
-use wiab_core::task::{Task, TaskError, TaskId, TaskNumbering, TaskRepository, TaskSnapshot};
+use wiab_core::task::{
+    Task, TaskError, TaskId, TaskNumbering, TaskRepository, TaskSnapshot, TaskState,
+};
 use wiab_core::team::TeamId;
 use wiab_core::work::{WorkId, WorkRepository};
 
@@ -100,6 +102,34 @@ impl<T: TaskRepository, B: BoardRepository, W: WorkRepository> TaskApplicationSe
             .claim_next(&board_id, team_id)
             .await?
             .map(|(task, _)| task.snapshot()))
+    }
+
+    /// The task a team is currently holding, if any.
+    ///
+    /// A team that was stopped mid-issue still owns its task. On restart it asks this so it
+    /// can carry on rather than claim something new and strand the old one in progress.
+    ///
+    /// `Assigned` counts as held: the team took the task and may not have started it yet.
+    /// `Blocked` counts too — the team still owns it. Escalated and settled tasks do not.
+    pub async fn held_task(&self, team_id: &str) -> anyhow::Result<Option<TaskSnapshot>> {
+        let team_id: TeamId = team_id.parse()?;
+        let mut held = self
+            .task_repository
+            .list()
+            .await?
+            .into_iter()
+            .filter(|task| {
+                task.assignee() == Some(team_id)
+                    && matches!(
+                        task.state(),
+                        TaskState::Assigned | TaskState::InProgress | TaskState::Blocked
+                    )
+            })
+            .collect::<Vec<_>>();
+        // A team works one issue at a time, so more than one would be a bug elsewhere;
+        // answering with the oldest keeps it deterministic rather than arbitrary.
+        held.sort_by_key(|task| task.id().number());
+        Ok(held.first().map(Task::snapshot))
     }
 
     pub async fn start_task(&self, task_id: &str) -> anyhow::Result<Option<TaskSnapshot>> {
@@ -600,5 +630,73 @@ mod tests {
         assert!(service.task_snapshot("T-404").await.unwrap().is_none());
         assert!(service.start_task("T-404").await.unwrap().is_none());
         assert!(service.complete_task("T-404").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_team_can_ask_which_task_it_is_holding() {
+        let service = service();
+        let board = seed_board(&service, 1).await;
+        let work = seed_work(&service, 1).await;
+        queue(&service, &board, &work).await;
+        service.claim_next_task(&board, "TM-1").await.unwrap();
+
+        // Assigned counts: the team took it and may not have started yet.
+        let held = service.held_task("TM-1").await.unwrap().unwrap();
+        assert_eq!(held.id, "T-1");
+
+        service.start_task("T-1").await.unwrap();
+        assert_eq!(service.held_task("TM-1").await.unwrap().unwrap().id, "T-1");
+
+        // Blocked still counts — the team owns it.
+        service
+            .block_task("T-1", "waiting".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(service.held_task("TM-1").await.unwrap().unwrap().id, "T-1");
+    }
+
+    #[tokio::test]
+    async fn a_team_holding_nothing_gets_nothing() {
+        let service = service();
+        let board = seed_board(&service, 1).await;
+        let work = seed_work(&service, 1).await;
+        queue(&service, &board, &work).await;
+
+        // Unclaimed work belongs to no one.
+        assert!(service.held_task("TM-1").await.unwrap().is_none());
+
+        // Another team's task is not this team's.
+        service.claim_next_task(&board, "TM-2").await.unwrap();
+        assert!(service.held_task("TM-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn settled_and_escalated_tasks_are_not_held() {
+        // Escalation released the team; completing and failing ended the work.
+        let service = service();
+        let board = seed_board(&service, 1).await;
+        let work = seed_work(&service, 1).await;
+        for _ in 0..2 {
+            queue(&service, &board, &work).await;
+        }
+
+        service.claim_next_task(&board, "TM-1").await.unwrap();
+        service.start_task("T-1").await.unwrap();
+        service
+            .escalate_task("T-1", "needs a decision".to_owned())
+            .await
+            .unwrap();
+        assert!(service.held_task("TM-1").await.unwrap().is_none());
+
+        // The escalated task went back to the front of the board, so this claims it again.
+        let again = service
+            .claim_next_task(&board, "TM-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.id, "T-1");
+        service.start_task(&again.id).await.unwrap();
+        service.complete_task(&again.id).await.unwrap();
+        assert!(service.held_task("TM-1").await.unwrap().is_none());
     }
 }
