@@ -1,4 +1,5 @@
 use deadpool_postgres::Pool;
+use tokio_postgres::Row;
 use wiab_core::board::BoardId;
 use wiab_core::organization::OrganizationId;
 use wiab_core::repo::RepoId;
@@ -27,24 +28,22 @@ fn save_error<E: std::fmt::Display>(error: E) -> SaveError {
     SaveError::Backend(error.to_string())
 }
 
-/// Rebuild from a row. Uses `from_persistence`, not `new`, because a stored team may be in
-/// a state `new` cannot produce.
-fn team_from_columns(
-    id: TeamId,
-    organization_id: &str,
-    name: String,
-    description: String,
-    board_id: &str,
-    repo_id: &str,
-    vm_template: String,
-    state: &str,
-    vm_id: Option<String>,
-) -> Result<Team, RepoError> {
+/// Rebuild from a row laid out as [`COLUMNS`]. Uses `from_persistence`, not `new`, because a
+/// stored team may be in a state `new` cannot produce.
+fn team_from_row(row: &Row) -> Result<Team, RepoError> {
+    let id: String = row.get(0);
+    let id: TeamId = id.parse().map_err(repo_error)?;
+    let organization_id: String = row.get(1);
     let organization_id: OrganizationId = organization_id.parse().map_err(repo_error)?;
+    let board_id: String = row.get(4);
     let board_id: BoardId = board_id.parse().map_err(repo_error)?;
+    let repo_id: String = row.get(5);
     let repo_id: RepoId = repo_id.parse().map_err(repo_error)?;
+    let vm_template: String = row.get(6);
     let vm_template = VmTemplate::new(vm_template).map_err(repo_error)?;
+    let state: String = row.get(7);
     let state: TeamState = state.parse().map_err(repo_error)?;
+    let vm_id: Option<String> = row.get(8);
     let vm_id = vm_id
         .map(|id| id.parse::<VmId>())
         .transpose()
@@ -52,8 +51,8 @@ fn team_from_columns(
     Ok(Team::from_persistence(
         id,
         organization_id,
-        name,
-        description,
+        row.get(2),
+        row.get(3),
         board_id,
         repo_id,
         vm_template,
@@ -61,6 +60,9 @@ fn team_from_columns(
         vm_id,
     ))
 }
+
+const COLUMNS: &str =
+    "id, organization_id, name, description, board_id, repo_id, vm_template, state, vm_id";
 
 impl TeamRepository for PostgresTeamRepository {
     async fn save(&self, team: Team, expected: Version) -> Result<Version, SaveError> {
@@ -129,8 +131,7 @@ impl TeamRepository for PostgresTeamRepository {
         let client = self.pool.get().await.map_err(repo_error)?;
         let row = client
             .query_opt(
-                "SELECT version, organization_id, name, description, vm_template, state, vm_id, \
-                 board_id, repo_id FROM team WHERE id = $1",
+                &format!("SELECT {COLUMNS}, version FROM team WHERE id = $1"),
                 &[&id.to_string()],
             )
             .await
@@ -138,23 +139,11 @@ impl TeamRepository for PostgresTeamRepository {
         match row {
             None => Ok(None),
             Some(row) => {
-                let version: i64 = row.get(0);
-                let organization_id: String = row.get(1);
-                let state: String = row.get(5);
-                let board_id: String = row.get(7);
-                let repo_id: String = row.get(8);
-                let team = team_from_columns(
-                    *id,
-                    &organization_id,
-                    row.get(2),
-                    row.get(3),
-                    &board_id,
-                    &repo_id,
-                    row.get(4),
-                    &state,
-                    row.get(6),
-                )?;
-                Ok(Some((team, Version::from_value(version as u64))))
+                let version: i64 = row.get(9);
+                Ok(Some((
+                    team_from_row(&row)?,
+                    Version::from_value(version as u64),
+                )))
             }
         }
     }
@@ -162,33 +151,9 @@ impl TeamRepository for PostgresTeamRepository {
     async fn list(&self) -> Result<Vec<Team>, RepoError> {
         let client = self.pool.get().await.map_err(repo_error)?;
         let rows = client
-            .query(
-                "SELECT id, organization_id, name, description, vm_template, state, vm_id, \
-                 board_id, repo_id FROM team",
-                &[],
-            )
+            .query(&format!("SELECT {COLUMNS} FROM team"), &[])
             .await
             .map_err(repo_error)?;
-        rows.into_iter()
-            .map(|row| {
-                let id: String = row.get(0);
-                let id: TeamId = id.parse().map_err(repo_error)?;
-                let organization_id: String = row.get(1);
-                let state: String = row.get(5);
-                let board_id: String = row.get(7);
-                let repo_id: String = row.get(8);
-                team_from_columns(
-                    id,
-                    &organization_id,
-                    row.get(2),
-                    row.get(3),
-                    &board_id,
-                    &repo_id,
-                    row.get(4),
-                    &state,
-                    row.get(6),
-                )
-            })
-            .collect()
+        rows.iter().map(team_from_row).collect()
     }
 }
