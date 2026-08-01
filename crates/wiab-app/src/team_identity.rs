@@ -31,4 +31,11 @@ pub trait TeamIdentity: Send + Sync {
         user_id: UserId,
         organization_id: OrganizationId,
     ) -> anyhow::Result<String>;
+
+    /// Revoke every token the team holds.
+    ///
+    /// Called when a team stops. A token is minted per start and only ever reaches that
+    /// container, so once the container is gone the token has no legitimate user left —
+    /// leaving it valid is a credential outliving its purpose for no reason.
+    async fn revoke_tokens(&self, user_id: UserId) -> anyhow::Result<()>;
 }

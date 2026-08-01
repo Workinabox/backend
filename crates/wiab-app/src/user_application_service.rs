@@ -250,6 +250,22 @@ impl<U: UserRepository> UserApplicationService<U> {
         }
     }
 
+    /// Revoke every token a user holds. `Ok(None)` when the user is unknown.
+    pub async fn revoke_all_tokens(&self, user_id: &str) -> anyhow::Result<Option<usize>> {
+        let id: UserId = user_id.parse()?;
+        loop {
+            let Some((mut user, version)) = self.user_repository.get(&id).await? else {
+                return Ok(None);
+            };
+            let removed = user.revoke_all_tokens();
+            match self.user_repository.save(user, version).await {
+                Ok(_) => return Ok(Some(removed)),
+                Err(SaveError::Conflict) => continue,
+                Err(SaveError::Backend(error)) => return Err(anyhow!(error)),
+            }
+        }
+    }
+
     pub async fn revoke_token(
         &self,
         user_id: &str,

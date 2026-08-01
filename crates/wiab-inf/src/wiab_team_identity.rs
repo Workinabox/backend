@@ -71,4 +71,14 @@ impl TeamIdentity for WiabTeamIdentity {
             .ok_or_else(|| anyhow::anyhow!("team user {user_id} has no record to issue against"))?;
         Ok(issued.plaintext)
     }
+
+    async fn revoke_tokens(&self, user_id: UserId) -> anyhow::Result<()> {
+        let revoked = self.users.revoke_all_tokens(&user_id.to_string()).await?;
+        if let Some(count) = revoked
+            && count > 0
+        {
+            tracing::info!("revoked {count} token(s) for team user {user_id}");
+        }
+        Ok(())
+    }
 }

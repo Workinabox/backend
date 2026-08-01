@@ -159,6 +159,15 @@ impl User {
         Ok(())
     }
 
+    /// Revoke every token at once, returning how many went. Used when the identity itself
+    /// stops being in use — revoking one at a time would be a save per token, and the
+    /// caller does not care which ones existed.
+    pub fn revoke_all_tokens(&mut self) -> usize {
+        let removed = self.tokens.len();
+        self.tokens.clear();
+        removed
+    }
+
     /// The token whose stored hash matches, used to resolve an HTTPS request to this user.
     pub fn token_by_hash(&self, hash: &str) -> Option<&AccessToken> {
         self.tokens.iter().find(|token| token.matches_hash(hash))
