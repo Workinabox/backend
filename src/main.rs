@@ -181,6 +181,12 @@ fn self_signed_names(base_url: &str) -> Vec<String> {
     names
 }
 
+fn init_tracing(filter: &str) {
+    tracing_subscriber::fmt()
+        .with_env_filter(filter.to_owned())
+        .init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,10 +209,4 @@ mod tests {
     fn a_malformed_base_url_still_yields_the_defaults() {
         assert_eq!(self_signed_names("not-a-url").len(), 3);
     }
-}
-
-fn init_tracing(filter: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(filter.to_owned())
-        .init();
 }
