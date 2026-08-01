@@ -98,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks/{task_id}/complete", post(complete_task))
         .route("/tasks/{task_id}/fail", post(fail_task))
         .route("/teams/{team_id}", get(get_team))
+        .route("/teams/{team_id}/task", get(get_held_task))
         .route("/teams/{team_id}/start", post(start_team))
         .route("/teams/{team_id}/pause", post(pause_team))
         .route("/teams/{team_id}/resume", post(resume_team))
@@ -689,6 +690,23 @@ async fn get_team(
     {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("team", &team_id)),
+    }
+}
+
+/// The task this team is holding. 404 when it holds none — a restarting team treats that
+/// the same as an unknown team: nothing to carry on with, so claim something new.
+async fn get_held_task(
+    State(state): State<AppState>,
+    Path(team_id): Path<String>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    match state
+        .task_service
+        .held_task(&team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("held task for team", &team_id)),
     }
 }
 

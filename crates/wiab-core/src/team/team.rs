@@ -180,10 +180,14 @@ impl Team {
         Ok(())
     }
 
-    /// Stop taking new issues. An idle team pauses at once; a working team is recorded as
-    /// paused only when its current issue finishes, so this is legal from `Idle` alone.
+    /// Stop taking new issues, and stop the issue in hand.
+    ///
+    /// Legal from `Idle` and from `Working`. A working team is recorded as paused straight
+    /// away rather than when its issue ends: the team polls this state, finishes the agent
+    /// turn it is in, checkpoints, and idles. Waiting for the issue to finish would make
+    /// pause indistinguishable from "stop eventually", which is not what it is for.
     pub fn pause(&mut self) -> Result<(), TeamError> {
-        if self.state != TeamState::Idle {
+        if !matches!(self.state, TeamState::Idle | TeamState::Working) {
             return Err(TeamError::NotRunning(self.state));
         }
         self.state = TeamState::Paused;
@@ -351,13 +355,26 @@ mod tests {
     }
 
     #[test]
-    fn pausing_a_working_team_directly_is_rejected() {
-        // The application layer records the request; the team settles on finish_work.
+    fn pausing_a_working_team_takes_effect_at_once() {
+        // The team polls this state and stops at its next node boundary. Waiting for the
+        // issue to end would make pause mean "stop eventually".
         let mut team = running_team();
         team.mark_working().unwrap();
+        team.pause().unwrap();
+        assert_eq!(team.state(), TeamState::Paused);
+        assert_eq!(
+            team.vm_id(),
+            Some(VmId::from_number(5)),
+            "the container stays"
+        );
+    }
+
+    #[test]
+    fn a_stopped_team_cannot_be_paused() {
+        let mut team = team();
         assert_eq!(
             team.pause().unwrap_err(),
-            TeamError::NotRunning(TeamState::Working)
+            TeamError::NotRunning(TeamState::Stopped)
         );
     }
 
