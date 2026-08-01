@@ -144,9 +144,11 @@ impl VmRuntime for DockerRuntime {
         // somewhere writable. A sized tmpfs keeps the rootfs read-only and leaves
         // nothing behind on the host when the container goes away.
         if self.config.agent_runtime.needs_workspace() {
+            // mode=1777: a tmpfs Docker mounts defaults to root-owned 0755, and the image
+            // runs as a non-root user — so without this the team cannot even clone.
             tmpfs.insert(
                 "/workspace".to_owned(),
-                format!("size={}m,exec", self.config.workspace_mib),
+                format!("size={}m,exec,mode=1777", self.config.workspace_mib),
             );
         }
         let host_config = HostConfig {
