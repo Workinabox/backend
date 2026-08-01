@@ -2,6 +2,7 @@ pub mod access;
 pub mod agent;
 pub mod audio;
 pub mod board;
+pub mod event;
 pub mod meeting;
 pub mod meeting_traits;
 pub mod organization;

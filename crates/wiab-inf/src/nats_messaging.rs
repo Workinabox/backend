@@ -22,6 +22,9 @@ impl NatsConfig {
     }
 }
 
+/// Clone is cheap: `async_nats::Client` is a handle onto one shared connection, so a
+/// clone shares the connection rather than opening another.
+#[derive(Clone)]
 pub struct NatsMessaging {
     client: Client,
 }

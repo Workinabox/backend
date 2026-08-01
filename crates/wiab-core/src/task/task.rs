@@ -1,4 +1,5 @@
 use crate::board::BoardId;
+use crate::event::DomainEvent;
 use crate::task::{TaskError, TaskId, TaskSnapshot, TaskState};
 use crate::team::TeamId;
 use crate::work::WorkId;
@@ -21,6 +22,8 @@ pub struct Task {
     assignee: Option<TeamId>,
     /// Why the task is blocked, escalated or failed. Cleared whenever it moves on.
     reason: Option<String>,
+    /// What has happened to this task since it was loaded, drained on save.
+    events: Vec<DomainEvent>,
 }
 
 impl Task {
@@ -33,6 +36,7 @@ impl Task {
             state: TaskState::Created,
             assignee: None,
             reason: None,
+            events: Vec::new(),
         }
     }
 
@@ -52,6 +56,7 @@ impl Task {
             state,
             assignee,
             reason,
+            events: Vec::new(),
         }
     }
 
@@ -91,6 +96,10 @@ impl Task {
         self.state = TaskState::Assigned;
         self.assignee = Some(team_id);
         self.reason = None;
+        self.record(
+            "task.assigned",
+            serde_json::json!({"team_id": team_id.to_string()}),
+        );
         Ok(())
     }
 
@@ -100,6 +109,7 @@ impl Task {
             return Err(TaskError::NotAssigned(self.state));
         }
         self.state = TaskState::InProgress;
+        self.record("task.started", serde_json::json!({}));
         Ok(())
     }
 
@@ -110,6 +120,7 @@ impl Task {
         }
         let reason = non_empty(reason)?;
         self.state = TaskState::Blocked;
+        self.record("task.blocked", serde_json::json!({"reason": reason}));
         self.reason = Some(reason);
         Ok(())
     }
@@ -121,6 +132,7 @@ impl Task {
         }
         self.state = TaskState::InProgress;
         self.reason = None;
+        self.record("task.resumed", serde_json::json!({}));
         Ok(())
     }
 
@@ -133,6 +145,7 @@ impl Task {
         let reason = non_empty(reason)?;
         self.state = TaskState::Escalated;
         self.assignee = None;
+        self.record("task.escalated", serde_json::json!({"reason": reason}));
         self.reason = Some(reason);
         Ok(())
     }
@@ -144,6 +157,7 @@ impl Task {
         }
         self.state = TaskState::Completed;
         self.reason = None;
+        self.record("task.completed", serde_json::json!({}));
         Ok(())
     }
 
@@ -155,8 +169,20 @@ impl Task {
         }
         let reason = non_empty(reason)?;
         self.state = TaskState::Failed;
+        self.record("task.failed", serde_json::json!({"reason": reason}));
         self.reason = Some(reason);
         Ok(())
+    }
+
+    /// Hand over what has happened, clearing it. Called by the repository, which writes
+    /// these in the same transaction as the row — see `DomainEvent`.
+    pub fn take_events(&mut self) -> Vec<DomainEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn record(&mut self, name: &str, payload: serde_json::Value) {
+        self.events
+            .push(DomainEvent::new(name, self.id.to_string(), payload));
     }
 
     pub fn snapshot(&self) -> TaskSnapshot {
@@ -389,5 +415,43 @@ mod tests {
         );
         assert_eq!(task.state(), TaskState::Escalated);
         assert_eq!(task.reason(), Some("needs a decision"));
+    }
+
+    #[test]
+    fn a_task_records_what_happened_to_it() {
+        let mut task = working_task();
+        task.complete().unwrap();
+
+        let names: Vec<String> = task.take_events().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["task.assigned", "task.started", "task.completed"]);
+    }
+
+    #[test]
+    fn taking_events_clears_them_so_a_save_cannot_publish_twice() {
+        let mut task = working_task();
+        assert!(!task.take_events().is_empty());
+        assert!(task.take_events().is_empty());
+    }
+
+    #[test]
+    fn an_event_carries_the_reason_a_human_needs() {
+        let mut task = working_task();
+        task.fail("the build never went green".to_owned()).unwrap();
+
+        let failed = task
+            .take_events()
+            .into_iter()
+            .find(|e| e.name == "task.failed")
+            .expect("failing records an event");
+        assert_eq!(failed.aggregate_id, "T-1");
+        assert_eq!(failed.payload["reason"], "the build never went green");
+    }
+
+    #[test]
+    fn a_rejected_transition_records_nothing() {
+        // Otherwise consumers would hear about changes that never happened.
+        let mut task = task();
+        assert!(task.complete().is_err());
+        assert!(task.take_events().is_empty());
     }
 }

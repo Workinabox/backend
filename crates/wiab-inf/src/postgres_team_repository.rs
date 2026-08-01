@@ -69,8 +69,12 @@ const COLUMNS: &str = "id, organization_id, name, description, board_id, repo_id
      vm_id";
 
 impl TeamRepository for PostgresTeamRepository {
-    async fn save(&self, team: Team, expected: Version) -> Result<Version, SaveError> {
-        let client = self.pool.get().await.map_err(save_error)?;
+    async fn save(&self, mut team: Team, expected: Version) -> Result<Version, SaveError> {
+        // One transaction for the row and the events it produced, so a committed change
+        // always has its events and a rolled-back one never does.
+        let events = team.take_events();
+        let mut client = self.pool.get().await.map_err(save_error)?;
+        let transaction = client.transaction().await.map_err(save_error)?;
         let id = team.id().to_string();
         let next = expected.next();
         let next_version = next.value() as i64;
@@ -82,7 +86,7 @@ impl TeamRepository for PostgresTeamRepository {
         let state = team.state().to_string();
         let vm_id = team.vm_id().map(|id| id.to_string());
         let rows = if expected == Version::NEW {
-            client
+            transaction
                 .execute(
                     "INSERT INTO team (id, version, organization_id, name, description, board_id, \
                      repo_id, user_id, vm_template, state, vm_id) \
@@ -105,7 +109,7 @@ impl TeamRepository for PostgresTeamRepository {
                 .await
                 .map_err(save_error)?
         } else {
-            client
+            transaction
                 .execute(
                     "UPDATE team SET version = $2, organization_id = $3, name = $4, \
                      description = $5, vm_template = $6, state = $7, vm_id = $8, \
@@ -132,6 +136,10 @@ impl TeamRepository for PostgresTeamRepository {
         if rows == 0 {
             return Err(SaveError::Conflict);
         }
+        crate::outbox_writes::append(&transaction, &events)
+            .await
+            .map_err(save_error)?;
+        transaction.commit().await.map_err(save_error)?;
         Ok(next)
     }
 

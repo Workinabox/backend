@@ -1,4 +1,5 @@
 use crate::board::BoardId;
+use crate::event::DomainEvent;
 use crate::organization::OrganizationId;
 use crate::repo::RepoId;
 use crate::team::{TeamError, TeamId, TeamSnapshot, TeamState};
@@ -28,6 +29,8 @@ pub struct Team {
     /// The team's own identity. It authenticates to the backend as this user to claim work
     /// and to push, so what a team may do is an ordinary access grant, not a special case.
     user_id: UserId,
+    /// What has happened to this team since it was loaded, drained on save.
+    events: Vec<DomainEvent>,
     /// Which sandbox image to launch. Required, unlike `Agent`'s optional template: a team
     /// with no template could never start, so there is no point being able to create one.
     vm_template: VmTemplate,
@@ -63,6 +66,7 @@ impl Team {
             vm_template,
             state: TeamState::Stopped,
             vm_id: None,
+            events: Vec::new(),
         })
     }
 
@@ -91,6 +95,7 @@ impl Team {
             vm_template,
             state,
             vm_id,
+            events: Vec::new(),
         }
     }
 
@@ -141,6 +146,7 @@ impl Team {
             return Err(TeamError::NotStopped(self.state));
         }
         self.state = TeamState::Starting;
+        self.record("team.starting", serde_json::json!({}));
         Ok(())
     }
 
@@ -151,6 +157,10 @@ impl Team {
         }
         self.state = TeamState::Idle;
         self.vm_id = Some(vm_id);
+        self.record(
+            "team.started",
+            serde_json::json!({"vm_id": vm_id.to_string()}),
+        );
         Ok(())
     }
 
@@ -161,6 +171,7 @@ impl Team {
             return Err(TeamError::NotRunning(self.state));
         }
         self.state = TeamState::Working;
+        self.record("team.working", serde_json::json!({}));
         Ok(())
     }
 
@@ -177,6 +188,10 @@ impl Team {
         } else {
             TeamState::Idle
         };
+        self.record(
+            "team.finished_work",
+            serde_json::json!({"paused": pause_requested}),
+        );
         Ok(())
     }
 
@@ -191,6 +206,7 @@ impl Team {
             return Err(TeamError::NotRunning(self.state));
         }
         self.state = TeamState::Paused;
+        self.record("team.paused", serde_json::json!({}));
         Ok(())
     }
 
@@ -200,6 +216,7 @@ impl Team {
             return Err(TeamError::NotPaused(self.state));
         }
         self.state = TeamState::Idle;
+        self.record("team.resumed", serde_json::json!({}));
         Ok(())
     }
 
@@ -208,12 +225,25 @@ impl Team {
     pub fn stop(&mut self) {
         self.state = TeamState::Stopped;
         self.vm_id = None;
+        self.record("team.stopped", serde_json::json!({}));
     }
 
     /// The team could not be started. Terminal until started again; clears any VM.
     pub fn mark_failed(&mut self) {
         self.state = TeamState::Failed;
         self.vm_id = None;
+        self.record("team.failed", serde_json::json!({}));
+    }
+
+    /// Hand over what has happened, clearing it. Called by the repository, which writes
+    /// these in the same transaction as the row — see `DomainEvent`.
+    pub fn take_events(&mut self) -> Vec<DomainEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn record(&mut self, name: &str, payload: serde_json::Value) {
+        self.events
+            .push(DomainEvent::new(name, self.id.to_string(), payload));
     }
 
     pub fn snapshot(&self) -> TeamSnapshot {
@@ -469,5 +499,47 @@ mod tests {
         );
         assert_eq!(team.state(), TeamState::Paused);
         assert_eq!(team.vm_id(), Some(VmId::from_number(5)));
+    }
+
+    #[test]
+    fn a_team_records_its_lifecycle() {
+        let mut team = team();
+        team.start().unwrap();
+        team.mark_idle(VmId::from_number(5)).unwrap();
+        team.pause().unwrap();
+        team.resume().unwrap();
+        team.stop();
+
+        let names: Vec<String> = team.take_events().into_iter().map(|e| e.name).collect();
+        assert_eq!(
+            names,
+            [
+                "team.starting",
+                "team.started",
+                "team.paused",
+                "team.resumed",
+                "team.stopped"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_started_event_says_which_container() {
+        let mut team = running_team();
+        let started = team
+            .take_events()
+            .into_iter()
+            .find(|e| e.name == "team.started")
+            .expect("marking idle records an event");
+        assert_eq!(started.aggregate_id, "TM-1");
+        assert_eq!(started.payload["vm_id"], "VM-5");
+    }
+
+    #[test]
+    fn a_rejected_transition_records_nothing() {
+        // Otherwise consumers would hear about changes that never happened.
+        let mut team = team();
+        assert!(team.pause().is_err());
+        assert!(team.take_events().is_empty());
     }
 }
