@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use wiab_core::agent::AgentId;
 use wiab_core::organization::{OrganizationId, OrganizationRepository};
 use wiab_core::repository::{SaveError, Version};
-use wiab_core::vm::{Vm, VmId, VmNumbering, VmRepository, VmResources, VmSnapshot, VmTemplate};
+use wiab_core::vm::{
+    Vm, VmId, VmNumbering, VmOwner, VmRepository, VmResources, VmSnapshot, VmTemplate,
+};
 
 use crate::vm_requests::ProvisionVmRequest;
 use crate::vm_runtime::{VmRuntime, VmSpec};
@@ -70,11 +71,11 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
     pub async fn provision_vm(
         &self,
         organization_id: &str,
-        agent_id: &str,
+        owner_id: &str,
         request: ProvisionVmRequest,
     ) -> anyhow::Result<Option<VmSnapshot>> {
         let organization_id: OrganizationId = organization_id.parse()?;
-        let agent_id: AgentId = agent_id.parse()?;
+        let owner: VmOwner = owner_id.parse()?;
         if self
             .organization_repository
             .get(&organization_id)
@@ -93,7 +94,7 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
         let mut vm = Vm::new(
             self.numbering.next(),
             organization_id,
-            agent_id,
+            owner,
             template,
             resources,
         );
@@ -101,7 +102,7 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
 
         let spec = VmSpec {
             id: vm.id().to_string(),
-            agent_id: vm.agent_id().to_string(),
+            agent_id: vm.owner().to_string(),
             template: vm.template().name().to_owned(),
             vcpus: resources.vcpus(),
             mem_mib: resources.mem_mib(),

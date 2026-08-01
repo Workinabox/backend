@@ -17,6 +17,7 @@ use wiab_core::project::{Project, ProjectId, ProjectRepository};
 use wiab_core::pull_request::{PullRequest, PullRequestId, PullRequestRepository};
 use wiab_core::repo::{Repo, RepoId, RepoRepository};
 use wiab_core::repository::{RepoError, SaveError, Version};
+use wiab_core::team::{Team, TeamId, TeamRepository};
 use wiab_core::user::{User, UserId, UserRepository};
 use wiab_core::vm::{Vm, VmId, VmRepository};
 use wiab_core::work::{Work, WorkId, WorkRepository};
@@ -24,11 +25,12 @@ use wiab_core::work::{Work, WorkId, WorkRepository};
 use crate::{
     InMemoryAgentRepository, InMemoryBoardRepository, InMemoryOrganizationRepository,
     InMemoryPipelineRepository, InMemoryProjectRepository, InMemoryPullRequestRepository,
-    InMemoryRepoRepository, InMemoryRoleAssignmentRepository, InMemoryUserRepository,
-    InMemoryVmRepository, InMemoryWorkRepository, PostgresAgentRepository, PostgresBoardRepository,
-    PostgresOrganizationRepository, PostgresPipelineRepository, PostgresProjectRepository,
-    PostgresPullRequestRepository, PostgresRepoRepository, PostgresRoleAssignmentRepository,
-    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository,
+    InMemoryRepoRepository, InMemoryRoleAssignmentRepository, InMemoryTeamRepository,
+    InMemoryUserRepository, InMemoryVmRepository, InMemoryWorkRepository, PostgresAgentRepository,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
+    PostgresProjectRepository, PostgresPullRequestRepository, PostgresRepoRepository,
+    PostgresRoleAssignmentRepository, PostgresTeamRepository, PostgresUserRepository,
+    PostgresVmRepository, PostgresWorkRepository,
 };
 
 #[derive(Clone)]
@@ -368,6 +370,35 @@ impl RoleAssignmentRepository for RoleAssignmentRepo {
         match self {
             Self::InMemory(repo) => repo.list().await,
             Self::Postgres(repo) => repo.list().await,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum TeamRepo {
+    InMemory(InMemoryTeamRepository),
+    Postgres(PostgresTeamRepository),
+}
+
+impl TeamRepository for TeamRepo {
+    async fn save(&self, team: Team, expected: Version) -> Result<Version, SaveError> {
+        match self {
+            Self::InMemory(inner) => inner.save(team, expected).await,
+            Self::Postgres(inner) => inner.save(team, expected).await,
+        }
+    }
+
+    async fn get(&self, id: &TeamId) -> Result<Option<(Team, Version)>, RepoError> {
+        match self {
+            Self::InMemory(inner) => inner.get(id).await,
+            Self::Postgres(inner) => inner.get(id).await,
+        }
+    }
+
+    async fn list(&self) -> Result<Vec<Team>, RepoError> {
+        match self {
+            Self::InMemory(inner) => inner.list().await,
+            Self::Postgres(inner) => inner.list().await,
         }
     }
 }

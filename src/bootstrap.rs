@@ -21,7 +21,8 @@ use wiab_app::{
     BoardApplicationService, CreateOrganizationRequest, CreateProjectRequest, CreateUserRequest,
     IssueTokenRequest, MeetingApplicationService, OrganizationApplicationService,
     PipelineApplicationService, ProjectApplicationService, PullRequestApplicationService,
-    RepoApplicationService, UserApplicationService, VmApplicationService, WorkApplicationService,
+    RepoApplicationService, TeamApplicationService, UserApplicationService, VmApplicationService,
+    WorkApplicationService,
 };
 use wiab_core::{
     access::{Role, RoleAssignmentRepository, Scope},
@@ -33,6 +34,7 @@ use wiab_core::{
     project::ProjectRepository,
     pull_request::PullRequestRepository,
     repo::{GitBackend, RepoRepository},
+    team::TeamRepository,
     transcript::FinalizedTranscript,
     user::{UserId, UserRepository},
     vm::VmRepository,
@@ -46,15 +48,16 @@ use wiab_inf::{
     InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
     InMemoryPullRequestNumbering, InMemoryPullRequestRepository, InMemoryRepoNumbering,
     InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
-    InMemoryUserNumbering, InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository,
-    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, MessagingDispatch,
-    NatsMessaging, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
-    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
-    PostgresProjectRepository, PostgresPullRequestRepository, PostgresRepoRepository,
-    PostgresRoleAssignmentRepository, PostgresUserRepository, PostgresVmRepository,
-    PostgresWorkRepository, ProjectRepo, PullRequestRepo, RandomTokenFactory, RepoRepo,
-    RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter, Sha256TokenHasher, SystemClock, UserRepo,
-    VmRepo, VmRuntimeDispatch, WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
+    InMemoryTeamNumbering, InMemoryTeamRepository, InMemoryUserNumbering, InMemoryUserRepository,
+    InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
+    LlamaMeetingIntelligence, MessagingDispatch, NatsMessaging, OrganizationRepo, PipelineRepo,
+    PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
+    PostgresPipelineRepository, PostgresProjectRepository, PostgresPullRequestRepository,
+    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresTeamRepository,
+    PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
+    PullRequestRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
+    Sha256TokenHasher, SystemClock, TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService,
+    WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
@@ -152,12 +155,12 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         info!("vm runtime: docker (firecracker disabled or /dev/kvm absent)");
         VmRuntimeDispatch::Docker(DockerRuntime::new(config.vm.docker.clone()).await?)
     };
-    let vm_service = VmApplicationService::new(
+    let vm_service = Arc::new(VmApplicationService::new(
         vm_repo,
         organization_repo.clone(),
         vm_runtime,
         Arc::new(vm_numbering),
-    );
+    ));
 
     let agent_repo = match &pool {
         Some(pool) => AgentRepo::Postgres(PostgresAgentRepository::new(pool.clone())),
@@ -170,8 +173,23 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
     let agent_service = Arc::new(AgentApplicationService::new(
         agent_repo,
         organization_repo.clone(),
-        vm_service,
+        vm_service.clone(),
         Arc::new(agent_numbering),
+    ));
+
+    let team_repo = match &pool {
+        Some(pool) => TeamRepo::Postgres(PostgresTeamRepository::new(pool.clone())),
+        None => TeamRepo::InMemory(InMemoryTeamRepository::new()),
+    };
+    let team_numbering =
+        InMemoryTeamNumbering::starting_at(next_after(&team_repo.list().await?, |team| {
+            team.id().number()
+        }));
+    let team_service = Arc::new(TeamApplicationService::new(
+        team_repo,
+        organization_repo.clone(),
+        vm_service,
+        Arc::new(team_numbering),
     ));
 
     let board_repo = match &pool {
@@ -511,6 +529,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         organization_service,
         project_service,
         agent_service,
+        team_service,
         board_service,
         messaging: Arc::new(messaging),
         pull_request_service,

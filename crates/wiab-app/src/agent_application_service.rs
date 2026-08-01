@@ -329,7 +329,7 @@ mod tests {
         VmSnapshot {
             id: id.to_owned(),
             organization_id: "O-1".to_owned(),
-            agent_id: "A-1".to_owned(),
+            owner_id: "A-1".to_owned(),
             template: "developer".to_owned(),
             state: state.to_owned(),
             guest_ip: guest_ip.map(str::to_owned),

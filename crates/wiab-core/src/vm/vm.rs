@@ -1,8 +1,8 @@
-use crate::agent::AgentId;
 use crate::organization::OrganizationId;
-use crate::vm::{VmError, VmId, VmResources, VmSnapshot, VmState, VmTemplate};
+use crate::vm::{VmError, VmId, VmOwner, VmResources, VmSnapshot, VmState, VmTemplate};
 
-/// A microVM sandbox: a `VM-###` id, the organization and agent it was booted for, the template
+/// A microVM sandbox: a `VM-###` id, the organization and owner (an agent or a team) it was
+/// booted for, the template
 /// it boots from, its compute sizing, its lifecycle state, and — once running — its guest IP.
 ///
 /// The lifecycle is a small state machine (see [`VmState`]): a VM is born `Creating`, becomes
@@ -13,7 +13,7 @@ use crate::vm::{VmError, VmId, VmResources, VmSnapshot, VmState, VmTemplate};
 pub struct Vm {
     id: VmId,
     organization_id: OrganizationId,
-    agent_id: AgentId,
+    owner: VmOwner,
     template: VmTemplate,
     resources: VmResources,
     state: VmState,
@@ -21,18 +21,18 @@ pub struct Vm {
 }
 
 impl Vm {
-    /// Provision a new VM in the `Creating` state, not yet booted, for the given agent.
+    /// Provision a new VM in the `Creating` state, not yet booted, for the given owner.
     pub fn new(
         id: VmId,
         organization_id: OrganizationId,
-        agent_id: AgentId,
+        owner: VmOwner,
         template: VmTemplate,
         resources: VmResources,
     ) -> Self {
         Self {
             id,
             organization_id,
-            agent_id,
+            owner,
             template,
             resources,
             state: VmState::Creating,
@@ -46,7 +46,7 @@ impl Vm {
     pub fn from_parts(
         id: VmId,
         organization_id: OrganizationId,
-        agent_id: AgentId,
+        owner: VmOwner,
         template: VmTemplate,
         resources: VmResources,
         state: VmState,
@@ -55,7 +55,7 @@ impl Vm {
         Self {
             id,
             organization_id,
-            agent_id,
+            owner,
             template,
             resources,
             state,
@@ -71,8 +71,8 @@ impl Vm {
         self.organization_id
     }
 
-    pub fn agent_id(&self) -> AgentId {
-        self.agent_id
+    pub fn owner(&self) -> VmOwner {
+        self.owner
     }
 
     pub fn template(&self) -> &VmTemplate {
@@ -122,7 +122,7 @@ impl Vm {
         VmSnapshot {
             id: self.id.to_string(),
             organization_id: self.organization_id.to_string(),
-            agent_id: self.agent_id.to_string(),
+            owner_id: self.owner.to_string(),
             template: self.template.to_string(),
             state: self.state.to_string(),
             guest_ip: self.guest_ip.clone(),
@@ -134,13 +134,15 @@ impl Vm {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent::AgentId;
+
     use super::*;
 
     fn vm() -> Vm {
         Vm::new(
             VmId::from_number(1),
             OrganizationId::from_number(1),
-            AgentId::from_number(1),
+            VmOwner::Agent(AgentId::from_number(1)),
             VmTemplate::new("developer").unwrap(),
             VmResources::default(),
         )
@@ -214,7 +216,7 @@ mod tests {
         let vm = Vm::from_parts(
             VmId::from_number(3),
             OrganizationId::from_number(4),
-            AgentId::from_number(5),
+            VmOwner::Agent(AgentId::from_number(5)),
             VmTemplate::new("base").unwrap(),
             VmResources::new(8, 4096),
             VmState::Running,
@@ -222,7 +224,7 @@ mod tests {
         );
         assert_eq!(vm.id(), VmId::from_number(3));
         assert_eq!(vm.organization_id(), OrganizationId::from_number(4));
-        assert_eq!(vm.agent_id(), AgentId::from_number(5));
+        assert_eq!(vm.owner(), VmOwner::Agent(AgentId::from_number(5)));
         assert_eq!(vm.template(), &VmTemplate::new("base").unwrap());
         assert_eq!(vm.resources(), VmResources::new(8, 4096));
         assert_eq!(vm.state(), VmState::Running);
