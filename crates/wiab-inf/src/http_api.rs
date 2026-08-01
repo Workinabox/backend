@@ -12,10 +12,10 @@ use base64::Engine;
 use wiab_app::{
     AddDoneRequest, AddSshKeyRequest, CommitChangesRequest, CreateAgentRequest, CreateBoardRequest,
     CreateMeetingRequest, CreateOrganizationRequest, CreatePipelineRequest, CreateProjectRequest,
-    CreateRepoRequest, CreateUserRequest, CreateWorkRequest, GrantRoleRequest, IssueTokenRequest,
-    IssuedTokenSnapshot, MergePullRequestRequest, OpenPullRequestRequest, SetVisibilityRequest,
-    UpdateAgentRequest, UpdateBoardRequest, UpdateOrganizationRequest, UpdatePipelineRequest,
-    UpdateProjectRequest, UpdateRepoRequest, UpdateWorkRequest,
+    CreateRepoRequest, CreateTeamRequest, CreateUserRequest, CreateWorkRequest, GrantRoleRequest,
+    IssueTokenRequest, IssuedTokenSnapshot, MergePullRequestRequest, OpenPullRequestRequest,
+    SetVisibilityRequest, UpdateAgentRequest, UpdateBoardRequest, UpdateOrganizationRequest,
+    UpdatePipelineRequest, UpdateProjectRequest, UpdateRepoRequest, UpdateWorkRequest,
 };
 use wiab_core::access::{Operation, Role, RoleAssignmentSnapshot, Scope};
 use wiab_core::agent::{AgentId, AgentSnapshot};
@@ -27,6 +27,7 @@ use wiab_core::pipeline::PipelineSnapshot;
 use wiab_core::project::ProjectSnapshot;
 use wiab_core::pull_request::PullRequestSnapshot;
 use wiab_core::repo::{BranchSnapshot, CommitSnapshot, FileEntrySnapshot, RepoId, RepoSnapshot};
+use wiab_core::team::TeamSnapshot;
 use wiab_core::user::{TokenScope, UserId, UserSnapshot};
 use wiab_core::work::WorkSnapshot;
 
@@ -50,6 +51,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/organizations/{organization_id}/agents",
             get(list_agents).post(create_agent),
+        )
+        .route(
+            "/organizations/{organization_id}/teams",
+            get(list_teams).post(create_team),
         )
         .route(
             "/organizations/{organization_id}/meetings",
@@ -78,6 +83,11 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{agent_id}", put(update_agent).get(get_agent))
         .route("/agents/{agent_id}/activate", post(activate_agent))
         .route("/agents/{agent_id}/deactivate", post(deactivate_agent))
+        .route("/teams/{team_id}", get(get_team))
+        .route("/teams/{team_id}/start", post(start_team))
+        .route("/teams/{team_id}/pause", post(pause_team))
+        .route("/teams/{team_id}/resume", post(resume_team))
+        .route("/teams/{team_id}/stop", post(stop_team))
         .route("/boards/{board_id}", put(update_board).get(get_board))
         .route("/repos/{repo_id}", put(update_repo).get(get_repo))
         .route("/repos/{repo_id}/branches", get(list_branches))
@@ -458,6 +468,123 @@ async fn deactivate_agent(
     {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("agent", &agent_id)),
+    }
+}
+
+async fn list_teams(
+    State(state): State<AppState>,
+    Path(organization_id): Path<String>,
+) -> Result<Json<Vec<TeamSnapshot>>, (StatusCode, String)> {
+    match state
+        .team_service
+        .list_teams(&organization_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshots) => Ok(Json(snapshots)),
+        None => Err(not_found("organization", &organization_id)),
+    }
+}
+
+async fn create_team(
+    State(state): State<AppState>,
+    Path(organization_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTeamRequest>,
+) -> Result<Json<TeamSnapshot>, (StatusCode, String)> {
+    // A team can boot a sandbox, so this needs org-Administer, as creating an agent does.
+    require_org_role(&state, &organization_id, Operation::Administer, &headers).await?;
+    match state
+        .team_service
+        .create_team(&organization_id, request)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("organization", &organization_id)),
+    }
+}
+
+async fn get_team(
+    State(state): State<AppState>,
+    Path(team_id): Path<String>,
+) -> Result<Json<TeamSnapshot>, (StatusCode, String)> {
+    match state
+        .team_service
+        .team_snapshot(&team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("team", &team_id)),
+    }
+}
+
+async fn start_team(
+    State(state): State<AppState>,
+    Path(team_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TeamSnapshot>, (StatusCode, String)> {
+    require_team_org_role(&state, &team_id, Operation::Administer, &headers).await?;
+    match state
+        .team_service
+        .start_team(&team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("team", &team_id)),
+    }
+}
+
+async fn pause_team(
+    State(state): State<AppState>,
+    Path(team_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TeamSnapshot>, (StatusCode, String)> {
+    require_team_org_role(&state, &team_id, Operation::Administer, &headers).await?;
+    match state
+        .team_service
+        .pause_team(&team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("team", &team_id)),
+    }
+}
+
+async fn resume_team(
+    State(state): State<AppState>,
+    Path(team_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TeamSnapshot>, (StatusCode, String)> {
+    require_team_org_role(&state, &team_id, Operation::Administer, &headers).await?;
+    match state
+        .team_service
+        .resume_team(&team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("team", &team_id)),
+    }
+}
+
+async fn stop_team(
+    State(state): State<AppState>,
+    Path(team_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TeamSnapshot>, (StatusCode, String)> {
+    require_team_org_role(&state, &team_id, Operation::Administer, &headers).await?;
+    match state
+        .team_service
+        .stop_team(&team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("team", &team_id)),
     }
 }
 
@@ -1095,6 +1222,25 @@ async fn require_agent_org_role(
         return Err(not_found("agent", agent_id));
     };
     require_org_role(state, &agent.organization_id, operation, headers).await
+}
+
+/// Requires the caller hold `operation` on the org that owns a team. 404 if the team is
+/// unknown. Used by the lifecycle handlers, which address a team by id.
+async fn require_team_org_role(
+    state: &AppState,
+    team_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(team) = state
+        .team_service
+        .team_snapshot(team_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("team", team_id));
+    };
+    require_org_role(state, &team.organization_id, operation, headers).await
 }
 
 /// Requires the caller hold `operation` on the org that owns a work (via its project). 404 if the

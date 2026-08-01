@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use wiab_core::organization::OrganizationRepository;
 use wiab_core::vm::{VmRepository, VmSnapshot};
 
@@ -38,5 +40,26 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmProvisioning
 
     async fn get(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>> {
         self.get_vm(vm_id).await
+    }
+}
+
+/// Lets one `Arc`-shared vm service back several callers — the agent and team services both
+/// provision sandboxes, and `VmApplicationService` is not `Clone`.
+impl<T: VmProvisioning> VmProvisioning for Arc<T> {
+    async fn provision(
+        &self,
+        organization_id: &str,
+        agent_id: &str,
+        request: ProvisionVmRequest,
+    ) -> anyhow::Result<Option<VmSnapshot>> {
+        (**self).provision(organization_id, agent_id, request).await
+    }
+
+    async fn stop(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>> {
+        (**self).stop(vm_id).await
+    }
+
+    async fn get(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>> {
+        (**self).get(vm_id).await
     }
 }
