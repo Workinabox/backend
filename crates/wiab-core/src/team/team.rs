@@ -2,6 +2,7 @@ use crate::board::BoardId;
 use crate::organization::OrganizationId;
 use crate::repo::RepoId;
 use crate::team::{TeamError, TeamId, TeamSnapshot, TeamState};
+use crate::user::UserId;
 use crate::vm::{VmId, VmTemplate};
 
 /// A long-lived worker that pulls issues from the board and runs them one at a time.
@@ -24,6 +25,9 @@ pub struct Team {
     description: String,
     board_id: BoardId,
     repo_id: RepoId,
+    /// The team's own identity. It authenticates to the backend as this user to claim work
+    /// and to push, so what a team may do is an ordinary access grant, not a special case.
+    user_id: UserId,
     /// Which sandbox image to launch. Required, unlike `Agent`'s optional template: a team
     /// with no template could never start, so there is no point being able to create one.
     vm_template: VmTemplate,
@@ -32,6 +36,9 @@ pub struct Team {
 }
 
 impl Team {
+    /// Eight fields, because a team genuinely references eight things — collapsing them into
+    /// a parameter struct would only move the list somewhere else.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: TeamId,
         organization_id: OrganizationId,
@@ -39,6 +46,7 @@ impl Team {
         description: String,
         board_id: BoardId,
         repo_id: RepoId,
+        user_id: UserId,
         vm_template: VmTemplate,
     ) -> Result<Self, TeamError> {
         if name.trim().is_empty() {
@@ -51,6 +59,7 @@ impl Team {
             description,
             board_id,
             repo_id,
+            user_id,
             vm_template,
             state: TeamState::Stopped,
             vm_id: None,
@@ -66,6 +75,7 @@ impl Team {
         description: String,
         board_id: BoardId,
         repo_id: RepoId,
+        user_id: UserId,
         vm_template: VmTemplate,
         state: TeamState,
         vm_id: Option<VmId>,
@@ -77,6 +87,7 @@ impl Team {
             description,
             board_id,
             repo_id,
+            user_id,
             vm_template,
             state,
             vm_id,
@@ -105,6 +116,10 @@ impl Team {
 
     pub fn repo_id(&self) -> RepoId {
         self.repo_id
+    }
+
+    pub fn user_id(&self) -> UserId {
+        self.user_id
     }
 
     pub fn vm_template(&self) -> &VmTemplate {
@@ -205,6 +220,7 @@ impl Team {
             description: self.description.clone(),
             board_id: self.board_id.to_string(),
             repo_id: self.repo_id.to_string(),
+            user_id: self.user_id.to_string(),
             vm_template: self.vm_template.to_string(),
             state: self.state.to_string(),
             vm_id: self.vm_id.map(|id| id.to_string()),
@@ -228,6 +244,7 @@ mod tests {
             "the platform team".to_owned(),
             BoardId::from_number(3),
             RepoId::from_number(4),
+            UserId::from_number(5),
             template(),
         )
         .unwrap()
@@ -257,6 +274,7 @@ mod tests {
         assert_eq!(team.description(), "the platform team");
         assert_eq!(team.board_id(), BoardId::from_number(3));
         assert_eq!(team.repo_id(), RepoId::from_number(4));
+        assert_eq!(team.user_id(), UserId::from_number(5));
         assert_eq!(team.vm_template(), &template());
     }
 
@@ -269,6 +287,7 @@ mod tests {
             String::new(),
             BoardId::from_number(3),
             RepoId::from_number(4),
+            UserId::from_number(5),
             template(),
         )
         .unwrap_err();
@@ -411,6 +430,7 @@ mod tests {
         assert_eq!(snapshot.description, "the platform team");
         assert_eq!(snapshot.board_id, "B-3");
         assert_eq!(snapshot.repo_id, "R-4");
+        assert_eq!(snapshot.user_id, "U-5");
         assert_eq!(snapshot.vm_template, "developer");
         assert_eq!(snapshot.state, "idle");
         assert_eq!(snapshot.vm_id.as_deref(), Some("VM-5"));
@@ -425,6 +445,7 @@ mod tests {
             String::new(),
             BoardId::from_number(3),
             RepoId::from_number(4),
+            UserId::from_number(5),
             template(),
             TeamState::Paused,
             Some(VmId::from_number(5)),

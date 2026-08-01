@@ -59,7 +59,7 @@ use wiab_inf::{
     PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
     PullRequestRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
     Sha256TokenHasher, SystemClock, TaskRepo, TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch,
-    WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
+    WiabAuthService, WiabTeamIdentity, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
@@ -214,24 +214,6 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         git_backend.clone(),
     ));
 
-    let team_repo = match &pool {
-        Some(pool) => TeamRepo::Postgres(PostgresTeamRepository::new(pool.clone())),
-        None => TeamRepo::InMemory(InMemoryTeamRepository::new()),
-    };
-    let team_numbering =
-        InMemoryTeamNumbering::starting_at(next_after(&team_repo.list().await?, |team| {
-            team.id().number()
-        }));
-    let team_service = Arc::new(TeamApplicationService::new(
-        team_repo,
-        organization_repo.clone(),
-        board_repo.clone(),
-        repo_repo.clone(),
-        vm_service,
-        Arc::new(team_numbering),
-        config.auth.base_url.clone(),
-    ));
-
     let pull_request_repo = match &pool {
         Some(pool) => PullRequestRepo::Postgres(PostgresPullRequestRepository::new(pool.clone())),
         None => PullRequestRepo::InMemory(InMemoryPullRequestRepository::new()),
@@ -281,6 +263,25 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         user_repo.clone(),
         Arc::new(assignment_numbering),
     ));
+    let team_repo = match &pool {
+        Some(pool) => TeamRepo::Postgres(PostgresTeamRepository::new(pool.clone())),
+        None => TeamRepo::InMemory(InMemoryTeamRepository::new()),
+    };
+    let team_numbering =
+        InMemoryTeamNumbering::starting_at(next_after(&team_repo.list().await?, |team| {
+            team.id().number()
+        }));
+    let team_service = Arc::new(TeamApplicationService::new(
+        team_repo,
+        organization_repo.clone(),
+        board_repo.clone(),
+        repo_repo.clone(),
+        vm_service,
+        WiabTeamIdentity::new(user_service.clone(), access_service.clone()),
+        Arc::new(team_numbering),
+        config.auth.base_url.clone(),
+    ));
+
     let authorization_service = Arc::new(AuthorizationService::new(
         assignment_repo.clone(),
         repo_repo.clone(),

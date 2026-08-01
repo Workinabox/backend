@@ -152,6 +152,7 @@ async fn postgres_persistence_end_to_end() {
         "the platform team".into(),
         BoardId::from_number(1),
         RepoId::from_number(7),
+        UserId::from_number(1),
         VmTemplate::new("developer".to_owned()).unwrap(),
     )
     .unwrap();
