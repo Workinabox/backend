@@ -294,7 +294,7 @@ mod tests {
         VmSnapshot {
             id: id.to_owned(),
             organization_id: "O-1".to_owned(),
-            agent_id: "TM-1".to_owned(),
+            owner_id: "TM-1".to_owned(),
             template: "developer".to_owned(),
             state: state.to_owned(),
             guest_ip: Some("172.16.0.9".to_owned()),

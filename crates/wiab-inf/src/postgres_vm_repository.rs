@@ -1,8 +1,7 @@
 use deadpool_postgres::Pool;
-use wiab_core::agent::AgentId;
 use wiab_core::organization::OrganizationId;
 use wiab_core::repository::{RepoError, SaveError, Version};
-use wiab_core::vm::{Vm, VmId, VmRepository, VmResources, VmState, VmTemplate};
+use wiab_core::vm::{Vm, VmId, VmOwner, VmRepository, VmResources, VmState, VmTemplate};
 
 /// PostgreSQL-backed vm repository. One row per aggregate in `vm`, guarded by an
 /// optimistic-concurrency `version` column.
@@ -30,7 +29,7 @@ fn save_error<E: std::fmt::Display>(error: E) -> SaveError {
 fn vm_from_columns(
     id: VmId,
     organization_id: String,
-    agent_id: String,
+    owner_id: String,
     template: String,
     state: String,
     guest_ip: Option<String>,
@@ -38,14 +37,14 @@ fn vm_from_columns(
     mem_mib: i64,
 ) -> Result<Vm, RepoError> {
     let organization_id: OrganizationId = organization_id.parse().map_err(repo_error)?;
-    let agent_id: AgentId = agent_id.parse().map_err(repo_error)?;
+    let owner: VmOwner = owner_id.parse().map_err(repo_error)?;
     let template = VmTemplate::new(template).map_err(repo_error)?;
     let state: VmState = state.parse().map_err(repo_error)?;
     let resources = VmResources::new(vcpus as u32, mem_mib as u32);
     Ok(Vm::from_parts(
         id,
         organization_id,
-        agent_id,
+        owner,
         template,
         resources,
         state,
@@ -60,7 +59,7 @@ impl VmRepository for PostgresVmRepository {
         let next = expected.next();
         let next_version = next.value() as i64;
         let organization_id = vm.organization_id().to_string();
-        let agent_id = vm.agent_id().to_string();
+        let owner_id = vm.owner().to_string();
         let template = vm.template().name().to_owned();
         let state = vm.state().to_string();
         let guest_ip = vm.guest_ip().map(|ip| ip.to_owned());
@@ -76,7 +75,7 @@ impl VmRepository for PostgresVmRepository {
                         &id,
                         &next_version,
                         &organization_id,
-                        &agent_id,
+                        &owner_id,
                         &template,
                         &state,
                         &guest_ip,
@@ -96,7 +95,7 @@ impl VmRepository for PostgresVmRepository {
                         &id,
                         &next_version,
                         &organization_id,
-                        &agent_id,
+                        &owner_id,
                         &template,
                         &state,
                         &guest_ip,

@@ -15,7 +15,7 @@ pub trait VmProvisioning: Send + Sync {
     async fn provision(
         &self,
         organization_id: &str,
-        agent_id: &str,
+        owner_id: &str,
         request: ProvisionVmRequest,
     ) -> anyhow::Result<Option<VmSnapshot>>;
     async fn stop(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>>;
@@ -28,10 +28,10 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmProvisioning
     async fn provision(
         &self,
         organization_id: &str,
-        agent_id: &str,
+        owner_id: &str,
         request: ProvisionVmRequest,
     ) -> anyhow::Result<Option<VmSnapshot>> {
-        self.provision_vm(organization_id, agent_id, request).await
+        self.provision_vm(organization_id, owner_id, request).await
     }
 
     async fn stop(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>> {
@@ -49,10 +49,10 @@ impl<T: VmProvisioning> VmProvisioning for Arc<T> {
     async fn provision(
         &self,
         organization_id: &str,
-        agent_id: &str,
+        owner_id: &str,
         request: ProvisionVmRequest,
     ) -> anyhow::Result<Option<VmSnapshot>> {
-        (**self).provision(organization_id, agent_id, request).await
+        (**self).provision(organization_id, owner_id, request).await
     }
 
     async fn stop(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>> {

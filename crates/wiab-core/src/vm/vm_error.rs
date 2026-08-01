@@ -6,6 +6,8 @@ pub enum VmError {
     EmptyTemplate,
     #[error("'{0}' is not a valid vm id")]
     InvalidVmId(String),
+    #[error("'{0}' is not an agent or team id, so no vm can be booted for it")]
+    InvalidVmOwner(String),
     #[error("'{0}' is not a valid vm state")]
     InvalidVmState(String),
     #[error("a vm can only start running from the Creating state")]
