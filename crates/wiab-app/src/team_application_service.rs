@@ -6,8 +6,10 @@ use wiab_core::organization::{OrganizationId, OrganizationRepository};
 use wiab_core::repo::{RepoId, RepoRepository};
 use wiab_core::repository::{SaveError, Version};
 use wiab_core::team::{Team, TeamId, TeamNumbering, TeamRepository, TeamSnapshot};
+use wiab_core::user::UserId;
 use wiab_core::vm::{VmId, VmTemplate};
 
+use crate::team_identity::TeamIdentity;
 use crate::team_requests::CreateTeamRequest;
 use crate::vm_provisioning::VmProvisioning;
 use crate::vm_requests::ProvisionVmRequest;
@@ -18,10 +20,9 @@ use crate::vm_requests::ProvisionVmRequest;
 /// URL is the same `<api>/repos/R-<n>.git` the git transport serves, so the repo id and the
 /// remote never drift apart.
 ///
-/// The API token is deliberately *not* here: it is a credential, it is the same for every
-/// team, and it already reaches the container through the backend's own `WIAB_TEAM_*`
-/// environment.
-fn worker_env(team: &TeamSnapshot, api_url: &str) -> Vec<(String, String)> {
+/// The token is minted fresh for this container and never stored, so a credential lives only
+/// as long as the container it was issued to.
+fn worker_env(team: &TeamSnapshot, api_url: &str, token: &str) -> Vec<(String, String)> {
     let api_url = api_url.trim_end_matches('/');
     vec![
         ("WIAB_TEAM_API_URL".to_owned(), api_url.to_owned()),
@@ -31,6 +32,7 @@ fn worker_env(team: &TeamSnapshot, api_url: &str) -> Vec<(String, String)> {
             "WIAB_TEAM_REPO_REMOTE".to_owned(),
             format!("{api_url}/repos/{}.git", team.repo_id),
         ),
+        ("WIAB_TEAM_API_TOKEN".to_owned(), token.to_owned()),
     ]
 }
 
@@ -49,12 +51,14 @@ pub struct TeamApplicationService<
     B: BoardRepository,
     R: RepoRepository,
     V: VmProvisioning,
+    I: TeamIdentity,
 > {
     team_repository: T,
     organization_repository: O,
     board_repository: B,
     repo_repository: R,
     vm: V,
+    identity: I,
     numbering: Arc<dyn TeamNumbering>,
     /// Where the team's container reaches this backend. The container polls over HTTP, so it
     /// needs the public URL rather than the address the server happens to bind.
@@ -67,14 +71,19 @@ impl<
     B: BoardRepository,
     R: RepoRepository,
     V: VmProvisioning,
-> TeamApplicationService<T, O, B, R, V>
+    I: TeamIdentity,
+> TeamApplicationService<T, O, B, R, V, I>
 {
+    /// One argument per collaborator. A builder would hide which ones are required, which is
+    /// the only thing worth knowing here.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         team_repository: T,
         organization_repository: O,
         board_repository: B,
         repo_repository: R,
         vm: V,
+        identity: I,
         numbering: Arc<dyn TeamNumbering>,
         api_url: String,
     ) -> Self {
@@ -84,6 +93,7 @@ impl<
             board_repository,
             repo_repository,
             vm,
+            identity,
             numbering,
             api_url,
         }
@@ -133,14 +143,20 @@ impl<
         {
             return Ok(None);
         }
+        let template = VmTemplate::new(request.vm_type)?;
+        let team_id = self.numbering.next();
+        // Provisioned before the aggregate exists, so a team is never persisted without the
+        // identity it needs in order to do anything.
+        let user_id = self.identity.provision(team_id, &request.name, id).await?;
         let team = Team::new(
-            self.numbering.next(),
+            team_id,
             id,
             request.name,
             request.description,
             board_id,
             repo_id,
-            VmTemplate::new(request.vm_type)?,
+            user_id,
+            template,
         )?;
         let snapshot = team.snapshot();
         self.team_repository.save(team, Version::NEW).await?;
@@ -159,11 +175,14 @@ impl<
         let Some(team) = self.mutate(&id, |team| team.start()).await? else {
             return Ok(None);
         };
+        let user_id: UserId = team.user_id.parse()?;
+        let organization: OrganizationId = team.organization_id.parse()?;
+        let token = self.identity.issue_token(user_id, organization).await?;
         let request = ProvisionVmRequest {
             template: team.vm_template.clone(),
             vcpus: None,
             mem_mib: None,
-            env: worker_env(&team, &self.api_url),
+            env: worker_env(&team, &self.api_url, &token),
         };
         let vm = match self
             .vm
@@ -408,6 +427,40 @@ mod tests {
         }
     }
 
+    /// Hands out a fixed user and a counted token, so a test can see that each start mints
+    /// a new one rather than reusing the last.
+    #[derive(Default)]
+    struct StubTeamIdentity {
+        tokens: RwLock<Vec<String>>,
+        granted: RwLock<Vec<(String, String)>>,
+    }
+
+    impl TeamIdentity for StubTeamIdentity {
+        async fn provision(
+            &self,
+            team_id: TeamId,
+            name: &str,
+            organization_id: OrganizationId,
+        ) -> anyhow::Result<UserId> {
+            self.granted
+                .write()
+                .expect("test write lock poisoned")
+                .push((team_id.to_string(), format!("{name}@{organization_id}")));
+            Ok(UserId::from_number(9))
+        }
+
+        async fn issue_token(
+            &self,
+            _user_id: UserId,
+            _organization_id: OrganizationId,
+        ) -> anyhow::Result<String> {
+            let mut tokens = self.tokens.write().expect("test write lock poisoned");
+            let token = format!("tok-{}", tokens.len() + 1);
+            tokens.push(token.clone());
+            Ok(token)
+        }
+    }
+
     #[derive(Default)]
     struct TestTeamNumbering {
         counter: AtomicU64,
@@ -477,6 +530,7 @@ mod tests {
         TestBoardRepository,
         TestRepoRepository,
         StubVmProvisioning,
+        StubTeamIdentity,
     >;
 
     const API_URL: &str = "https://wiab.example";
@@ -488,6 +542,7 @@ mod tests {
             TestBoardRepository::default(),
             TestRepoRepository::default(),
             vm,
+            StubTeamIdentity::default(),
             Arc::new(TestTeamNumbering::default()),
             API_URL.to_owned(),
         )
@@ -742,9 +797,8 @@ mod tests {
             value("WIAB_TEAM_REPO_REMOTE"),
             "https://wiab.example/repos/R-7.git"
         );
-        // The API token is a credential shared by every team; it reaches the container
-        // through the backend's own environment, not through here.
-        assert!(!env.iter().any(|(key, _)| key.contains("TOKEN")));
+        // The token is minted for this container, never stored.
+        assert_eq!(value("WIAB_TEAM_API_TOKEN"), "tok-1");
     }
 
     #[test]
@@ -756,11 +810,12 @@ mod tests {
             description: String::new(),
             board_id: "B-2".to_owned(),
             repo_id: "R-3".to_owned(),
+            user_id: "U-9".to_owned(),
             vm_template: "developer".to_owned(),
             state: "starting".to_owned(),
             vm_id: None,
         };
-        let env = worker_env(&team, "https://wiab.example/");
+        let env = worker_env(&team, "https://wiab.example/", "tok");
         let value = |key: &str| {
             env.iter()
                 .find(|(k, _)| k == key)
@@ -771,6 +826,37 @@ mod tests {
         assert_eq!(
             value("WIAB_TEAM_REPO_REMOTE"),
             "https://wiab.example/repos/R-3.git"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_start_mints_a_fresh_token() {
+        // A token lives only as long as the container it was issued to, so restarting a
+        // team must not hand the new container the old credential.
+        let service = service();
+        let organization_id = seed_organization(&service, 1).await;
+        create(&service, &organization_id, "platform").await;
+
+        service.start_team("TM-1").await.unwrap();
+        service.stop_team("TM-1").await.unwrap();
+        service.start_team("TM-1").await.unwrap();
+
+        assert_eq!(
+            service.identity.tokens.read().unwrap().as_slice(),
+            ["tok-1", "tok-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_created_team_is_given_its_own_identity() {
+        let service = service();
+        let organization_id = seed_organization(&service, 1).await;
+        let created = create(&service, &organization_id, "platform").await;
+
+        assert_eq!(created.user_id, "U-9");
+        assert_eq!(
+            service.identity.granted.read().unwrap().as_slice(),
+            [("TM-1".to_owned(), "platform@O-1".to_owned())]
         );
     }
 }

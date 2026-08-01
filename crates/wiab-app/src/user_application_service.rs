@@ -6,6 +6,7 @@ use wiab_core::meeting_traits::Clock;
 use wiab_core::organization::OrganizationId;
 use wiab_core::repo::RepoId;
 use wiab_core::repository::{SaveError, Version};
+use wiab_core::team::TeamId;
 use wiab_core::user::{
     AccessToken, ExternalRef, KeyFingerprinter, SshKey, SshKeyId, TokenFactory, TokenHasher,
     TokenId, TokenScope, User, UserError, UserId, UserKind, UserNumbering, UserRepository,
@@ -142,6 +143,20 @@ impl<U: UserRepository> UserApplicationService<U> {
     ) -> anyhow::Result<UserSnapshot> {
         let mut user = User::new(self.numbering.next(), UserKind::Agent, name, None)?;
         user.add_external_ref(ExternalRef::new("agent", agent_id.to_string()));
+        let snapshot = user.snapshot();
+        self.user_repository.save(user, Version::NEW).await?;
+        Ok(snapshot)
+    }
+
+    /// Create the user a team authenticates as. The external ref records which team, so the
+    /// identity can be traced back from the user list.
+    pub async fn provision_team_user(
+        &self,
+        name: String,
+        team_id: TeamId,
+    ) -> anyhow::Result<UserSnapshot> {
+        let mut user = User::new(self.numbering.next(), UserKind::Agent, name, None)?;
+        user.add_external_ref(ExternalRef::new("team", team_id.to_string()));
         let snapshot = user.snapshot();
         self.user_repository.save(user, Version::NEW).await?;
         Ok(snapshot)

@@ -23,6 +23,7 @@ mod repo_requests;
 mod task_application_service;
 mod task_requests;
 mod team_application_service;
+mod team_identity;
 mod team_requests;
 mod user_application_service;
 mod user_requests;
@@ -59,6 +60,7 @@ pub use repo_requests::{
 pub use task_application_service::TaskApplicationService;
 pub use task_requests::{ClaimTaskRequest, CreateTaskRequest, TaskReasonRequest};
 pub use team_application_service::TeamApplicationService;
+pub use team_identity::TeamIdentity;
 pub use team_requests::CreateTeamRequest;
 pub use user_application_service::UserApplicationService;
 pub use user_requests::{
