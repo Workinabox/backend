@@ -6,17 +6,19 @@
 //!   cargo test -p wiab-inf --test postgres_integration -- --ignored
 //! ```
 
+use wiab_core::board::BoardId;
 use wiab_core::organization::{Organization, OrganizationId, OrganizationRepository};
 use wiab_core::project::ProjectId;
 use wiab_core::repository::{SaveError, Version};
+use wiab_core::task::{Task, TaskId, TaskRepository, TaskState};
 use wiab_core::team::{Team, TeamId, TeamRepository, TeamState};
 use wiab_core::user::{SshKey, SshKeyId, User, UserId, UserKind, UserRepository};
 use wiab_core::vm::{VmId, VmTemplate};
 use wiab_core::work::{Work, WorkId, WorkRepository};
 use wiab_inf::pg_pool;
 use wiab_inf::{
-    PostgresOrganizationRepository, PostgresTeamRepository, PostgresUserRepository,
-    PostgresWorkRepository,
+    PostgresOrganizationRepository, PostgresTaskRepository, PostgresTeamRepository,
+    PostgresUserRepository, PostgresWorkRepository,
 };
 
 #[tokio::test]
@@ -44,7 +46,7 @@ async fn postgres_persistence_end_to_end() {
         .expect("client")
         .batch_execute(
             "TRUNCATE organization, project, agent, board, repo, pipeline, work, work_done, \
-             app_user, user_ssh_key, user_access_token, role_assignment, team",
+             app_user, user_ssh_key, user_access_token, role_assignment, team, task",
         )
         .await
         .expect("truncate");
@@ -167,6 +169,62 @@ async fn postgres_persistence_end_to_end() {
     assert_eq!(team_back.state(), TeamState::Idle);
     assert_eq!(team_back.vm_id(), Some(VmId::from_number(5)));
     assert_eq!(teams.list().await.unwrap().len(), 1);
+
+    // --- Task: the board pull. Two teams claiming at once must not get the same task. ---
+    let tasks = PostgresTaskRepository::new(pool.clone());
+    let board = BoardId::from_number(1);
+    for number in [1, 2] {
+        tasks
+            .save(
+                Task::new(TaskId::from_number(number), board, WorkId::from_number(1)),
+                Version::NEW,
+            )
+            .await
+            .expect("insert task");
+    }
+
+    let (first, second) = tokio::join!(
+        tasks.claim_next(&board, TeamId::from_number(1)),
+        tasks.claim_next(&board, TeamId::from_number(2)),
+    );
+    let claimed: Vec<TaskId> = [first, second]
+        .into_iter()
+        .map(|outcome| outcome.expect("claim").expect("a task was waiting").0.id())
+        .collect();
+    assert_eq!(
+        claimed
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "concurrent claims took the same task"
+    );
+
+    // Both are held now, so a third claim finds nothing.
+    assert!(
+        tasks
+            .claim_next(&board, TeamId::from_number(3))
+            .await
+            .unwrap()
+            .is_none(),
+        "an empty board must yield nothing, not a held task"
+    );
+
+    // An escalated task goes back on the board and is claimable again.
+    let (mut task, version) = tasks.get(&claimed[0]).await.unwrap().expect("task present");
+    assert_eq!(task.state(), TaskState::Assigned);
+    task.start().unwrap();
+    task.escalate("needs a decision".to_owned()).unwrap();
+    tasks.save(task, version).await.expect("escalate");
+
+    let (reclaimed, _) = tasks
+        .claim_next(&board, TeamId::from_number(3))
+        .await
+        .unwrap()
+        .expect("the escalated task is back on the board");
+    assert_eq!(reclaimed.id(), claimed[0]);
+    assert_eq!(reclaimed.assignee(), Some(TeamId::from_number(3)));
+    assert_eq!(reclaimed.reason(), None, "the stale reason is cleared");
 
     // --- Durability across a fresh pool (proxy for a process restart). ---
     drop(orgs);
