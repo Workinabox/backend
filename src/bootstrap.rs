@@ -21,8 +21,8 @@ use wiab_app::{
     BoardApplicationService, CreateOrganizationRequest, CreateProjectRequest, CreateUserRequest,
     IssueTokenRequest, MeetingApplicationService, OrganizationApplicationService,
     PipelineApplicationService, ProjectApplicationService, PullRequestApplicationService,
-    RepoApplicationService, TeamApplicationService, UserApplicationService, VmApplicationService,
-    WorkApplicationService,
+    RepoApplicationService, TaskApplicationService, TeamApplicationService, UserApplicationService,
+    VmApplicationService, WorkApplicationService,
 };
 use wiab_core::{
     access::{Role, RoleAssignmentRepository, Scope},
@@ -34,6 +34,7 @@ use wiab_core::{
     project::ProjectRepository,
     pull_request::PullRequestRepository,
     repo::{GitBackend, RepoRepository},
+    task::TaskRepository,
     team::TeamRepository,
     transcript::FinalizedTranscript,
     user::{UserId, UserRepository},
@@ -48,16 +49,17 @@ use wiab_inf::{
     InMemoryPipelineRepository, InMemoryProjectNumbering, InMemoryProjectRepository,
     InMemoryPullRequestNumbering, InMemoryPullRequestRepository, InMemoryRepoNumbering,
     InMemoryRepoRepository, InMemoryRoleAssignmentNumbering, InMemoryRoleAssignmentRepository,
-    InMemoryTeamNumbering, InMemoryTeamRepository, InMemoryUserNumbering, InMemoryUserRepository,
-    InMemoryVmNumbering, InMemoryVmRepository, InMemoryWorkNumbering, InMemoryWorkRepository,
-    LlamaMeetingIntelligence, MessagingDispatch, NatsMessaging, OrganizationRepo, PipelineRepo,
-    PostgresAgentRepository, PostgresBoardRepository, PostgresOrganizationRepository,
-    PostgresPipelineRepository, PostgresProjectRepository, PostgresPullRequestRepository,
-    PostgresRepoRepository, PostgresRoleAssignmentRepository, PostgresTeamRepository,
+    InMemoryTaskNumbering, InMemoryTaskRepository, InMemoryTeamNumbering, InMemoryTeamRepository,
+    InMemoryUserNumbering, InMemoryUserRepository, InMemoryVmNumbering, InMemoryVmRepository,
+    InMemoryWorkNumbering, InMemoryWorkRepository, LlamaMeetingIntelligence, MessagingDispatch,
+    NatsMessaging, OrganizationRepo, PipelineRepo, PostgresAgentRepository,
+    PostgresBoardRepository, PostgresOrganizationRepository, PostgresPipelineRepository,
+    PostgresProjectRepository, PostgresPullRequestRepository, PostgresRepoRepository,
+    PostgresRoleAssignmentRepository, PostgresTaskRepository, PostgresTeamRepository,
     PostgresUserRepository, PostgresVmRepository, PostgresWorkRepository, ProjectRepo,
     PullRequestRepo, RandomTokenFactory, RepoRepo, RoleAssignmentRepo, Sfu, Sha256KeyFingerprinter,
-    Sha256TokenHasher, SystemClock, TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch, WiabAuthService,
-    WiabUserDirectory, WorkRepo, pg_pool,
+    Sha256TokenHasher, SystemClock, TaskRepo, TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch,
+    WiabAuthService, WiabUserDirectory, WorkRepo, pg_pool,
 };
 
 pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Result<AppState> {
@@ -201,7 +203,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
             board.id().number()
         }));
     let board_service = Arc::new(BoardApplicationService::new(
-        board_repo,
+        board_repo.clone(),
         project_repo.clone(),
         Arc::new(board_numbering),
     ));
@@ -354,9 +356,24 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
             work.id().number()
         }));
     let work_service = Arc::new(WorkApplicationService::new(
-        work_repo,
+        work_repo.clone(),
         project_repo.clone(),
         Arc::new(work_numbering),
+    ));
+
+    let task_repo = match &pool {
+        Some(pool) => TaskRepo::Postgres(PostgresTaskRepository::new(pool.clone())),
+        None => TaskRepo::InMemory(InMemoryTaskRepository::new()),
+    };
+    let task_numbering =
+        InMemoryTaskNumbering::starting_at(next_after(&task_repo.list().await?, |task| {
+            task.id().number()
+        }));
+    let task_service = Arc::new(TaskApplicationService::new(
+        task_repo,
+        board_repo,
+        work_repo,
+        Arc::new(task_numbering),
     ));
 
     // HTTP auth configuration. Cookie `Secure` follows the base-url scheme so the dev
@@ -529,6 +546,7 @@ pub async fn build_app_state(config: &crate::config::AppConfig) -> anyhow::Resul
         organization_service,
         project_service,
         agent_service,
+        task_service,
         team_service,
         board_service,
         messaging: Arc::new(messaging),

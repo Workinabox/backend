@@ -10,12 +10,13 @@ use axum::{
 };
 use base64::Engine;
 use wiab_app::{
-    AddDoneRequest, AddSshKeyRequest, CommitChangesRequest, CreateAgentRequest, CreateBoardRequest,
-    CreateMeetingRequest, CreateOrganizationRequest, CreatePipelineRequest, CreateProjectRequest,
-    CreateRepoRequest, CreateTeamRequest, CreateUserRequest, CreateWorkRequest, GrantRoleRequest,
-    IssueTokenRequest, IssuedTokenSnapshot, MergePullRequestRequest, OpenPullRequestRequest,
-    SetVisibilityRequest, UpdateAgentRequest, UpdateBoardRequest, UpdateOrganizationRequest,
-    UpdatePipelineRequest, UpdateProjectRequest, UpdateRepoRequest, UpdateWorkRequest,
+    AddDoneRequest, AddSshKeyRequest, ClaimTaskRequest, CommitChangesRequest, CreateAgentRequest,
+    CreateBoardRequest, CreateMeetingRequest, CreateOrganizationRequest, CreatePipelineRequest,
+    CreateProjectRequest, CreateRepoRequest, CreateTaskRequest, CreateTeamRequest,
+    CreateUserRequest, CreateWorkRequest, GrantRoleRequest, IssueTokenRequest, IssuedTokenSnapshot,
+    MergePullRequestRequest, OpenPullRequestRequest, SetVisibilityRequest, TaskReasonRequest,
+    UpdateAgentRequest, UpdateBoardRequest, UpdateOrganizationRequest, UpdatePipelineRequest,
+    UpdateProjectRequest, UpdateRepoRequest, UpdateWorkRequest,
 };
 use wiab_core::access::{Operation, Role, RoleAssignmentSnapshot, Scope};
 use wiab_core::agent::{AgentId, AgentSnapshot};
@@ -27,6 +28,7 @@ use wiab_core::pipeline::PipelineSnapshot;
 use wiab_core::project::ProjectSnapshot;
 use wiab_core::pull_request::PullRequestSnapshot;
 use wiab_core::repo::{BranchSnapshot, CommitSnapshot, FileEntrySnapshot, RepoId, RepoSnapshot};
+use wiab_core::task::TaskSnapshot;
 use wiab_core::team::TeamSnapshot;
 use wiab_core::user::{TokenScope, UserId, UserSnapshot};
 use wiab_core::work::WorkSnapshot;
@@ -83,6 +85,18 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{agent_id}", put(update_agent).get(get_agent))
         .route("/agents/{agent_id}/activate", post(activate_agent))
         .route("/agents/{agent_id}/deactivate", post(deactivate_agent))
+        .route(
+            "/boards/{board_id}/tasks",
+            get(list_tasks).post(create_task),
+        )
+        .route("/boards/{board_id}/tasks/claim", post(claim_next_task))
+        .route("/tasks/{task_id}", get(get_task))
+        .route("/tasks/{task_id}/start", post(start_task))
+        .route("/tasks/{task_id}/block", post(block_task))
+        .route("/tasks/{task_id}/resume", post(resume_task))
+        .route("/tasks/{task_id}/escalate", post(escalate_task))
+        .route("/tasks/{task_id}/complete", post(complete_task))
+        .route("/tasks/{task_id}/fail", post(fail_task))
         .route("/teams/{team_id}", get(get_team))
         .route("/teams/{team_id}/start", post(start_team))
         .route("/teams/{team_id}/pause", post(pause_team))
@@ -468,6 +482,159 @@ async fn deactivate_agent(
     {
         Some(snapshot) => Ok(Json(snapshot)),
         None => Err(not_found("agent", &agent_id)),
+    }
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+    Path(board_id): Path<String>,
+) -> Result<Json<Vec<TaskSnapshot>>, (StatusCode, String)> {
+    match state
+        .task_service
+        .list_tasks(&board_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshots) => Ok(Json(snapshots)),
+        None => Err(not_found("board", &board_id)),
+    }
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Path(board_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTaskRequest>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_board_org_role(&state, &board_id, Operation::Write, &headers).await?;
+    match state
+        .task_service
+        .create_task(&board_id, request)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        // Either end may be the missing one; the body says which id was rejected.
+        None => Err(not_found("board or work for board", &board_id)),
+    }
+}
+
+/// Take the next task off the board. 404 when nothing is waiting — a polling team treats
+/// "no work" and "no board" the same way: wait and ask again.
+async fn claim_next_task(
+    State(state): State<AppState>,
+    Path(board_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ClaimTaskRequest>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_board_org_role(&state, &board_id, Operation::Write, &headers).await?;
+    match state
+        .task_service
+        .claim_next_task(&board_id, &request.team_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("available task on board", &board_id)),
+    }
+}
+
+async fn get_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    match state
+        .task_service
+        .task_snapshot(&task_id)
+        .await
+        .map_err(bad_request)?
+    {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("task", &task_id)),
+    }
+}
+
+async fn start_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_task_org_role(&state, &task_id, Operation::Write, &headers).await?;
+    task_response(state.task_service.start_task(&task_id).await, &task_id)
+}
+
+async fn resume_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_task_org_role(&state, &task_id, Operation::Write, &headers).await?;
+    task_response(state.task_service.resume_task(&task_id).await, &task_id)
+}
+
+async fn complete_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_task_org_role(&state, &task_id, Operation::Write, &headers).await?;
+    task_response(state.task_service.complete_task(&task_id).await, &task_id)
+}
+
+async fn block_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<TaskReasonRequest>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_task_org_role(&state, &task_id, Operation::Write, &headers).await?;
+    task_response(
+        state
+            .task_service
+            .block_task(&task_id, request.reason)
+            .await,
+        &task_id,
+    )
+}
+
+async fn escalate_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<TaskReasonRequest>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_task_org_role(&state, &task_id, Operation::Write, &headers).await?;
+    task_response(
+        state
+            .task_service
+            .escalate_task(&task_id, request.reason)
+            .await,
+        &task_id,
+    )
+}
+
+async fn fail_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<TaskReasonRequest>,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    require_task_org_role(&state, &task_id, Operation::Write, &headers).await?;
+    task_response(
+        state.task_service.fail_task(&task_id, request.reason).await,
+        &task_id,
+    )
+}
+
+/// The seven task transitions all answer the same way: the new snapshot, 400 if the
+/// transition was illegal, 404 if the task is unknown.
+fn task_response(
+    outcome: anyhow::Result<Option<TaskSnapshot>>,
+    task_id: &str,
+) -> Result<Json<TaskSnapshot>, (StatusCode, String)> {
+    match outcome.map_err(bad_request)? {
+        Some(snapshot) => Ok(Json(snapshot)),
+        None => Err(not_found("task", task_id)),
     }
 }
 
@@ -1205,6 +1372,25 @@ async fn require_project_org_role(
     require_org_role(state, &project.organization_id, operation, headers).await
 }
 
+/// Requires the caller hold `operation` on the org that owns a board (via its project). 404 if
+/// the board is unknown. Used by the task handlers, which address the queue by its board.
+async fn require_board_org_role(
+    state: &AppState,
+    board_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(board) = state
+        .board_service
+        .board_snapshot(board_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("board", board_id));
+    };
+    require_project_org_role(state, &board.project_id, operation, headers).await
+}
+
 /// Requires the caller hold `operation` on the org that owns an agent. 404 if the agent is
 /// unknown. Used by the agent update/activate/deactivate handlers, which address an agent by id.
 async fn require_agent_org_role(
@@ -1222,6 +1408,25 @@ async fn require_agent_org_role(
         return Err(not_found("agent", agent_id));
     };
     require_org_role(state, &agent.organization_id, operation, headers).await
+}
+
+/// Requires the caller hold `operation` on the org that owns a task (via its board). 404 if
+/// the task is unknown. Used by the transition handlers, which address a task by id.
+async fn require_task_org_role(
+    state: &AppState,
+    task_id: &str,
+    operation: Operation,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(task) = state
+        .task_service
+        .task_snapshot(task_id)
+        .await
+        .map_err(bad_request)?
+    else {
+        return Err(not_found("task", task_id));
+    };
+    require_board_org_role(state, &task.board_id, operation, headers).await
 }
 
 /// Requires the caller hold `operation` on the org that owns a team. 404 if the team is
