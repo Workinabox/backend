@@ -62,6 +62,7 @@ pub mod system_clock;
 pub mod transcription;
 pub mod vm_comms_broker;
 pub mod vm_runtime_dispatch;
+pub mod wiab_team_identity;
 pub mod wiab_user_directory;
 
 pub use app_state::{
@@ -127,4 +128,5 @@ pub use speech_synthesizer::DefaultSpeechSynthesizer;
 pub use system_clock::SystemClock;
 pub use transcription::WhisperConfig;
 pub use vm_runtime_dispatch::VmRuntimeDispatch;
+pub use wiab_team_identity::WiabTeamIdentity;
 pub use wiab_user_directory::WiabUserDirectory;

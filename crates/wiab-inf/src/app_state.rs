@@ -19,7 +19,7 @@ use wiab_app::{
 use crate::{
     AgentRepo, BoardRepo, InMemoryMeetingRepository, MessagingDispatch, OrganizationRepo,
     PipelineRepo, ProjectRepo, PullRequestRepo, RepoRepo, RoleAssignmentRepo, Sfu, TaskRepo,
-    TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch, WiabUserDirectory, WorkRepo,
+    TeamRepo, UserRepo, VmRepo, VmRuntimeDispatch, WiabTeamIdentity, WiabUserDirectory, WorkRepo,
 };
 
 /// The fully-resolved vm application service (its runtime is chosen at boot — see bootstrap).
@@ -72,7 +72,14 @@ pub struct AppState {
         Arc<AgentApplicationService<AgentRepo, OrganizationRepo, Arc<WiabVmService>>>,
     pub task_service: Arc<TaskApplicationService<TaskRepo, BoardRepo, WorkRepo>>,
     pub team_service: Arc<
-        TeamApplicationService<TeamRepo, OrganizationRepo, BoardRepo, RepoRepo, Arc<WiabVmService>>,
+        TeamApplicationService<
+            TeamRepo,
+            OrganizationRepo,
+            BoardRepo,
+            RepoRepo,
+            Arc<WiabVmService>,
+            WiabTeamIdentity,
+        >,
     >,
     pub board_service: Arc<BoardApplicationService<BoardRepo, ProjectRepo>>,
     pub pull_request_service: Arc<PullRequestApplicationService<PullRequestRepo, RepoRepo>>,

@@ -5,6 +5,7 @@ use wiab_core::organization::OrganizationId;
 use wiab_core::repo::RepoId;
 use wiab_core::repository::{RepoError, SaveError, Version};
 use wiab_core::team::{Team, TeamId, TeamRepository, TeamState};
+use wiab_core::user::UserId;
 use wiab_core::vm::{VmId, VmTemplate};
 
 /// PostgreSQL-backed team repository. One row per aggregate in `team`, guarded by an
@@ -39,11 +40,13 @@ fn team_from_row(row: &Row) -> Result<Team, RepoError> {
     let board_id: BoardId = board_id.parse().map_err(repo_error)?;
     let repo_id: String = row.get(5);
     let repo_id: RepoId = repo_id.parse().map_err(repo_error)?;
-    let vm_template: String = row.get(6);
+    let user_id: String = row.get(6);
+    let user_id: UserId = user_id.parse().map_err(repo_error)?;
+    let vm_template: String = row.get(7);
     let vm_template = VmTemplate::new(vm_template).map_err(repo_error)?;
-    let state: String = row.get(7);
+    let state: String = row.get(8);
     let state: TeamState = state.parse().map_err(repo_error)?;
-    let vm_id: Option<String> = row.get(8);
+    let vm_id: Option<String> = row.get(9);
     let vm_id = vm_id
         .map(|id| id.parse::<VmId>())
         .transpose()
@@ -55,14 +58,15 @@ fn team_from_row(row: &Row) -> Result<Team, RepoError> {
         row.get(3),
         board_id,
         repo_id,
+        user_id,
         vm_template,
         state,
         vm_id,
     ))
 }
 
-const COLUMNS: &str =
-    "id, organization_id, name, description, board_id, repo_id, vm_template, state, vm_id";
+const COLUMNS: &str = "id, organization_id, name, description, board_id, repo_id, user_id, vm_template, state, \
+     vm_id";
 
 impl TeamRepository for PostgresTeamRepository {
     async fn save(&self, team: Team, expected: Version) -> Result<Version, SaveError> {
@@ -73,6 +77,7 @@ impl TeamRepository for PostgresTeamRepository {
         let organization_id = team.organization_id().to_string();
         let board_id = team.board_id().to_string();
         let repo_id = team.repo_id().to_string();
+        let user_id = team.user_id().to_string();
         let vm_template = team.vm_template().to_string();
         let state = team.state().to_string();
         let vm_id = team.vm_id().map(|id| id.to_string());
@@ -80,8 +85,8 @@ impl TeamRepository for PostgresTeamRepository {
             client
                 .execute(
                     "INSERT INTO team (id, version, organization_id, name, description, board_id, \
-                     repo_id, vm_template, state, vm_id) \
-                     VALUES ($1, $2, $3, $4, $5, $9, $10, $6, $7, $8) \
+                     repo_id, user_id, vm_template, state, vm_id) \
+                     VALUES ($1, $2, $3, $4, $5, $9, $10, $11, $6, $7, $8) \
                      ON CONFLICT (id) DO NOTHING",
                     &[
                         &id,
@@ -94,6 +99,7 @@ impl TeamRepository for PostgresTeamRepository {
                         &vm_id,
                         &board_id,
                         &repo_id,
+                        &user_id,
                     ],
                 )
                 .await
@@ -103,7 +109,8 @@ impl TeamRepository for PostgresTeamRepository {
                 .execute(
                     "UPDATE team SET version = $2, organization_id = $3, name = $4, \
                      description = $5, vm_template = $6, state = $7, vm_id = $8, \
-                     board_id = $10, repo_id = $11 WHERE id = $1 AND version = $9",
+                     board_id = $10, repo_id = $11, user_id = $12 \
+                     WHERE id = $1 AND version = $9",
                     &[
                         &id,
                         &next_version,
@@ -116,6 +123,7 @@ impl TeamRepository for PostgresTeamRepository {
                         &(expected.value() as i64),
                         &board_id,
                         &repo_id,
+                        &user_id,
                     ],
                 )
                 .await
@@ -139,7 +147,7 @@ impl TeamRepository for PostgresTeamRepository {
         match row {
             None => Ok(None),
             Some(row) => {
-                let version: i64 = row.get(9);
+                let version: i64 = row.get(10);
                 Ok(Some((
                     team_from_row(&row)?,
                     Version::from_value(version as u64),
