@@ -18,6 +18,7 @@ async fn launch_inspect_shutdown_roundtrip() {
         .expect("connect to docker daemon");
 
     let spec = VmSpec {
+        env: Vec::new(),
         id: "VM-9001".to_owned(),
         agent_id: "A-9001".to_owned(),
         template: "base".to_owned(),

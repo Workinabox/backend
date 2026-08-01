@@ -106,6 +106,7 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
             template: vm.template().name().to_owned(),
             vcpus: resources.vcpus(),
             mem_mib: resources.mem_mib(),
+            env: request.env,
         };
         match self.runtime.launch(spec).await {
             Ok(handle) => {
@@ -324,6 +325,7 @@ mod tests {
 
     fn provision(template: &str) -> ProvisionVmRequest {
         ProvisionVmRequest {
+            env: Vec::new(),
             template: template.to_owned(),
             vcpus: None,
             mem_mib: None,
@@ -375,6 +377,7 @@ mod tests {
                 &organization_id,
                 "A-1",
                 ProvisionVmRequest {
+                    env: Vec::new(),
                     template: "developer".to_owned(),
                     vcpus: Some(4),
                     mem_mib: Some(8192),

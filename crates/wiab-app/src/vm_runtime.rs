@@ -11,6 +11,8 @@ pub struct VmSpec {
     pub template: String,
     pub vcpus: u32,
     pub mem_mib: u32,
+    /// Owner-specific environment, appended to what the runtime always sets.
+    pub env: Vec<(String, String)>,
 }
 
 /// What the runtime reports back once a microVM has booted.

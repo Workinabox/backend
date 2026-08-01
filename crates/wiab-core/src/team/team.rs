@@ -1,4 +1,6 @@
+use crate::board::BoardId;
 use crate::organization::OrganizationId;
+use crate::repo::RepoId;
 use crate::team::{TeamError, TeamId, TeamSnapshot, TeamState};
 use crate::vm::{VmId, VmTemplate};
 
@@ -8,13 +10,20 @@ use crate::vm::{VmId, VmTemplate};
 /// and keeps running between issues — so its lifecycle is a state machine rather than a
 /// boolean, and pausing it does not release its container.
 ///
-/// `Team` is an aggregate root; it references its organization and its VM by identity only.
+/// A team is tied to one board and one repo: the board is where its work queues up, the repo
+/// is the codebase it works in. Both are required — a team with neither has nothing to pull
+/// and nowhere to push, so there is no point being able to create one.
+///
+/// `Team` is an aggregate root; it references its organization, board, repo and VM by
+/// identity only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Team {
     id: TeamId,
     organization_id: OrganizationId,
     name: String,
     description: String,
+    board_id: BoardId,
+    repo_id: RepoId,
     /// Which sandbox image to launch. Required, unlike `Agent`'s optional template: a team
     /// with no template could never start, so there is no point being able to create one.
     vm_template: VmTemplate,
@@ -28,6 +37,8 @@ impl Team {
         organization_id: OrganizationId,
         name: String,
         description: String,
+        board_id: BoardId,
+        repo_id: RepoId,
         vm_template: VmTemplate,
     ) -> Result<Self, TeamError> {
         if name.trim().is_empty() {
@@ -38,6 +49,8 @@ impl Team {
             organization_id,
             name,
             description,
+            board_id,
+            repo_id,
             vm_template,
             state: TeamState::Stopped,
             vm_id: None,
@@ -51,6 +64,8 @@ impl Team {
         organization_id: OrganizationId,
         name: String,
         description: String,
+        board_id: BoardId,
+        repo_id: RepoId,
         vm_template: VmTemplate,
         state: TeamState,
         vm_id: Option<VmId>,
@@ -60,6 +75,8 @@ impl Team {
             organization_id,
             name,
             description,
+            board_id,
+            repo_id,
             vm_template,
             state,
             vm_id,
@@ -80,6 +97,14 @@ impl Team {
 
     pub fn description(&self) -> &str {
         &self.description
+    }
+
+    pub fn board_id(&self) -> BoardId {
+        self.board_id
+    }
+
+    pub fn repo_id(&self) -> RepoId {
+        self.repo_id
     }
 
     pub fn vm_template(&self) -> &VmTemplate {
@@ -178,6 +203,8 @@ impl Team {
             organization_id: self.organization_id.to_string(),
             name: self.name.clone(),
             description: self.description.clone(),
+            board_id: self.board_id.to_string(),
+            repo_id: self.repo_id.to_string(),
             vm_template: self.vm_template.to_string(),
             state: self.state.to_string(),
             vm_id: self.vm_id.map(|id| id.to_string()),
@@ -199,6 +226,8 @@ mod tests {
             OrganizationId::from_number(2),
             "platform".to_owned(),
             "the platform team".to_owned(),
+            BoardId::from_number(3),
+            RepoId::from_number(4),
             template(),
         )
         .unwrap()
@@ -226,6 +255,8 @@ mod tests {
         assert_eq!(team.organization_id(), OrganizationId::from_number(2));
         assert_eq!(team.name(), "platform");
         assert_eq!(team.description(), "the platform team");
+        assert_eq!(team.board_id(), BoardId::from_number(3));
+        assert_eq!(team.repo_id(), RepoId::from_number(4));
         assert_eq!(team.vm_template(), &template());
     }
 
@@ -236,6 +267,8 @@ mod tests {
             OrganizationId::from_number(2),
             "   ".to_owned(),
             String::new(),
+            BoardId::from_number(3),
+            RepoId::from_number(4),
             template(),
         )
         .unwrap_err();
@@ -376,6 +409,8 @@ mod tests {
         assert_eq!(snapshot.organization_id, "O-2");
         assert_eq!(snapshot.name, "platform");
         assert_eq!(snapshot.description, "the platform team");
+        assert_eq!(snapshot.board_id, "B-3");
+        assert_eq!(snapshot.repo_id, "R-4");
         assert_eq!(snapshot.vm_template, "developer");
         assert_eq!(snapshot.state, "idle");
         assert_eq!(snapshot.vm_id.as_deref(), Some("VM-5"));
@@ -388,6 +423,8 @@ mod tests {
             OrganizationId::from_number(2),
             "platform".to_owned(),
             String::new(),
+            BoardId::from_number(3),
+            RepoId::from_number(4),
             template(),
             TeamState::Paused,
             Some(VmId::from_number(5)),

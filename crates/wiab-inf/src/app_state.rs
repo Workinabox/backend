@@ -71,7 +71,9 @@ pub struct AppState {
     pub agent_service:
         Arc<AgentApplicationService<AgentRepo, OrganizationRepo, Arc<WiabVmService>>>,
     pub task_service: Arc<TaskApplicationService<TaskRepo, BoardRepo, WorkRepo>>,
-    pub team_service: Arc<TeamApplicationService<TeamRepo, OrganizationRepo, Arc<WiabVmService>>>,
+    pub team_service: Arc<
+        TeamApplicationService<TeamRepo, OrganizationRepo, BoardRepo, RepoRepo, Arc<WiabVmService>>,
+    >,
     pub board_service: Arc<BoardApplicationService<BoardRepo, ProjectRepo>>,
     pub pull_request_service: Arc<PullRequestApplicationService<PullRequestRepo, RepoRepo>>,
     pub repo_service: Arc<RepoApplicationService<RepoRepo, ProjectRepo>>,

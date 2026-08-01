@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use wiab_core::board::{BoardId, BoardRepository};
 use wiab_core::organization::{OrganizationId, OrganizationRepository};
+use wiab_core::repo::{RepoId, RepoRepository};
 use wiab_core::repository::{SaveError, Version};
 use wiab_core::team::{Team, TeamId, TeamNumbering, TeamRepository, TeamSnapshot};
 use wiab_core::vm::{VmId, VmTemplate};
@@ -10,34 +12,80 @@ use crate::team_requests::CreateTeamRequest;
 use crate::vm_provisioning::VmProvisioning;
 use crate::vm_requests::ProvisionVmRequest;
 
+/// Everything the team's container needs to find its own work.
+///
+/// The names are the ones `wiab-team work` reads (see `sw-dev-team`'s `config.py`); the clone
+/// URL is the same `<api>/repos/R-<n>.git` the git transport serves, so the repo id and the
+/// remote never drift apart.
+///
+/// The API token is deliberately *not* here: it is a credential, it is the same for every
+/// team, and it already reaches the container through the backend's own `WIAB_TEAM_*`
+/// environment.
+fn worker_env(team: &TeamSnapshot, api_url: &str) -> Vec<(String, String)> {
+    let api_url = api_url.trim_end_matches('/');
+    vec![
+        ("WIAB_TEAM_API_URL".to_owned(), api_url.to_owned()),
+        ("WIAB_TEAM_TEAM_ID".to_owned(), team.id.clone()),
+        ("WIAB_TEAM_BOARD_ID".to_owned(), team.board_id.clone()),
+        (
+            "WIAB_TEAM_REPO_REMOTE".to_owned(),
+            format!("{api_url}/repos/{}.git", team.repo_id),
+        ),
+    ]
+}
+
 /// Orchestrates use cases over the `Team` aggregate — creation, and the start/pause/resume/stop
 /// lifecycle. Starting provisions a sandbox through the [`VmProvisioning`] port (the same port
 /// agent activation uses) and records the VM on the team; stopping releases it. Pausing does
 /// not: a paused team keeps its container so resuming needs no re-provisioning.
 ///
 /// Mutations use optimistic concurrency: load with version, apply, retry on conflict. Holds the
-/// organization repository to verify the parent org exists.
-pub struct TeamApplicationService<T: TeamRepository, O: OrganizationRepository, V: VmProvisioning> {
+/// organization, board and repo repositories to verify everything a team references exists
+/// before it is created — a team pointing at a board that was never written would start, poll
+/// nothing, and look idle rather than broken.
+pub struct TeamApplicationService<
+    T: TeamRepository,
+    O: OrganizationRepository,
+    B: BoardRepository,
+    R: RepoRepository,
+    V: VmProvisioning,
+> {
     team_repository: T,
     organization_repository: O,
+    board_repository: B,
+    repo_repository: R,
     vm: V,
     numbering: Arc<dyn TeamNumbering>,
+    /// Where the team's container reaches this backend. The container polls over HTTP, so it
+    /// needs the public URL rather than the address the server happens to bind.
+    api_url: String,
 }
 
-impl<T: TeamRepository, O: OrganizationRepository, V: VmProvisioning>
-    TeamApplicationService<T, O, V>
+impl<
+    T: TeamRepository,
+    O: OrganizationRepository,
+    B: BoardRepository,
+    R: RepoRepository,
+    V: VmProvisioning,
+> TeamApplicationService<T, O, B, R, V>
 {
     pub fn new(
         team_repository: T,
         organization_repository: O,
+        board_repository: B,
+        repo_repository: R,
         vm: V,
         numbering: Arc<dyn TeamNumbering>,
+        api_url: String,
     ) -> Self {
         Self {
             team_repository,
             organization_repository,
+            board_repository,
+            repo_repository,
             vm,
             numbering,
+            api_url,
         }
     }
 
@@ -70,14 +118,19 @@ impl<T: TeamRepository, O: OrganizationRepository, V: VmProvisioning>
             .map(|(team, _)| team.snapshot()))
     }
 
-    /// Returns `Ok(None)` when no organization with the given id exists.
+    /// Returns `Ok(None)` when the organization, the board or the repo is unknown.
     pub async fn create_team(
         &self,
         organization_id: &str,
         request: CreateTeamRequest,
     ) -> anyhow::Result<Option<TeamSnapshot>> {
         let id: OrganizationId = organization_id.parse()?;
-        if self.organization_repository.get(&id).await?.is_none() {
+        let board_id: BoardId = request.board_id.parse()?;
+        let repo_id: RepoId = request.repo_id.parse()?;
+        if self.organization_repository.get(&id).await?.is_none()
+            || self.board_repository.get(&board_id).await?.is_none()
+            || self.repo_repository.get(&repo_id).await?.is_none()
+        {
             return Ok(None);
         }
         let team = Team::new(
@@ -85,6 +138,8 @@ impl<T: TeamRepository, O: OrganizationRepository, V: VmProvisioning>
             id,
             request.name,
             request.description,
+            board_id,
+            repo_id,
             VmTemplate::new(request.vm_type)?,
         )?;
         let snapshot = team.snapshot();
@@ -108,6 +163,7 @@ impl<T: TeamRepository, O: OrganizationRepository, V: VmProvisioning>
             template: team.vm_template.clone(),
             vcpus: None,
             mem_mib: None,
+            env: worker_env(&team, &self.api_url),
         };
         let vm = match self
             .vm
@@ -187,7 +243,10 @@ mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use wiab_core::board::Board;
     use wiab_core::organization::Organization;
+    use wiab_core::project::ProjectId;
+    use wiab_core::repo::{Repo, Visibility};
     use wiab_core::repository::RepoError;
     use wiab_core::team::TeamState;
     use wiab_core::vm::VmSnapshot;
@@ -279,6 +338,76 @@ mod tests {
         }
     }
 
+    /// Answers `get` for every id it was seeded with. The team service only ever asks
+    /// whether a board or repo exists, so nothing more is needed.
+    #[derive(Default)]
+    struct TestBoardRepository {
+        boards: RwLock<HashMap<BoardId, Board>>,
+    }
+
+    impl BoardRepository for TestBoardRepository {
+        async fn save(&self, board: Board, expected: Version) -> Result<Version, SaveError> {
+            self.boards
+                .write()
+                .expect("test write lock poisoned")
+                .insert(board.id(), board);
+            Ok(expected.next())
+        }
+
+        async fn get(&self, id: &BoardId) -> Result<Option<(Board, Version)>, RepoError> {
+            Ok(self
+                .boards
+                .read()
+                .expect("test read lock poisoned")
+                .get(id)
+                .map(|board| (board.clone(), Version::from_value(1))))
+        }
+
+        async fn list(&self) -> Result<Vec<Board>, RepoError> {
+            Ok(self
+                .boards
+                .read()
+                .expect("test read lock poisoned")
+                .values()
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestRepoRepository {
+        repos: RwLock<HashMap<RepoId, Repo>>,
+    }
+
+    impl RepoRepository for TestRepoRepository {
+        async fn save(&self, repo: Repo, expected: Version) -> Result<Version, SaveError> {
+            self.repos
+                .write()
+                .expect("test write lock poisoned")
+                .insert(repo.id(), repo);
+            Ok(expected.next())
+        }
+
+        async fn get(&self, id: &RepoId) -> Result<Option<(Repo, Version)>, RepoError> {
+            Ok(self
+                .repos
+                .read()
+                .expect("test read lock poisoned")
+                .get(id)
+                .map(|repo| (repo.clone(), Version::from_value(1))))
+        }
+
+        async fn list(&self) -> Result<Vec<Repo>, RepoError> {
+            Ok(self
+                .repos
+                .read()
+                .expect("test read lock poisoned")
+                .values()
+                .cloned()
+                .collect())
+        }
+    }
+
     #[derive(Default)]
     struct TestTeamNumbering {
         counter: AtomicU64,
@@ -309,6 +438,7 @@ mod tests {
     struct StubVmProvisioning {
         fails: bool,
         stopped: RwLock<Vec<String>>,
+        provisioned_env: RwLock<Vec<(String, String)>>,
     }
 
     impl VmProvisioning for StubVmProvisioning {
@@ -316,8 +446,12 @@ mod tests {
             &self,
             _organization_id: &str,
             _agent_id: &str,
-            _request: ProvisionVmRequest,
+            request: ProvisionVmRequest,
         ) -> anyhow::Result<Option<VmSnapshot>> {
+            *self
+                .provisioned_env
+                .write()
+                .expect("test write lock poisoned") = request.env;
             if self.fails {
                 return Err(anyhow!("no capacity"));
             }
@@ -337,15 +471,25 @@ mod tests {
         }
     }
 
-    type Svc =
-        TeamApplicationService<TestTeamRepository, TestOrganizationRepository, StubVmProvisioning>;
+    type Svc = TeamApplicationService<
+        TestTeamRepository,
+        TestOrganizationRepository,
+        TestBoardRepository,
+        TestRepoRepository,
+        StubVmProvisioning,
+    >;
+
+    const API_URL: &str = "https://wiab.example";
 
     fn service_with(vm: StubVmProvisioning) -> Svc {
         TeamApplicationService::new(
             TestTeamRepository::default(),
             TestOrganizationRepository::default(),
+            TestBoardRepository::default(),
+            TestRepoRepository::default(),
             vm,
             Arc::new(TestTeamNumbering::default()),
+            API_URL.to_owned(),
         )
     }
 
@@ -366,6 +510,33 @@ mod tests {
             .save(organization, Version::NEW)
             .await
             .unwrap();
+
+        let board = Board::new(
+            BoardId::from_number(1),
+            ProjectId::from_number(1),
+            "backlog".to_owned(),
+            String::new(),
+        )
+        .unwrap();
+        service
+            .board_repository
+            .save(board, Version::NEW)
+            .await
+            .unwrap();
+
+        let repo = Repo::new(
+            RepoId::from_number(7),
+            ProjectId::from_number(1),
+            "widgets".to_owned(),
+            String::new(),
+            Visibility::Private,
+        )
+        .unwrap();
+        service
+            .repo_repository
+            .save(repo, Version::NEW)
+            .await
+            .unwrap();
         id
     }
 
@@ -376,6 +547,8 @@ mod tests {
                 CreateTeamRequest {
                     name: name.to_owned(),
                     description: String::new(),
+                    board_id: "B-1".to_owned(),
+                    repo_id: "R-7".to_owned(),
                     vm_type: "developer".to_owned(),
                 },
             )
@@ -405,6 +578,8 @@ mod tests {
                 CreateTeamRequest {
                     name: "platform".to_owned(),
                     description: String::new(),
+                    board_id: "B-1".to_owned(),
+                    repo_id: "R-7".to_owned(),
                     vm_type: "developer".to_owned(),
                 },
             )
@@ -541,5 +716,61 @@ mod tests {
 
         let restarted = service.start_team("TM-1").await.unwrap().unwrap();
         assert_eq!(restarted.state, TeamState::Idle.to_string());
+    }
+
+    #[tokio::test]
+    async fn a_started_team_is_told_which_board_to_poll_and_which_repo_to_clone() {
+        // Without this the container starts, polls nothing, and looks idle rather than
+        // misconfigured — the failure this whole change exists to prevent.
+        let service = service();
+        let organization_id = seed_organization(&service, 1).await;
+        create(&service, &organization_id, "platform").await;
+        service.start_team("TM-1").await.unwrap();
+
+        let env = service.vm.provisioned_env.read().unwrap().clone();
+        let value = |key: &str| {
+            env.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{key} was not passed to the container"))
+        };
+        assert_eq!(value("WIAB_TEAM_API_URL"), "https://wiab.example");
+        assert_eq!(value("WIAB_TEAM_TEAM_ID"), "TM-1");
+        assert_eq!(value("WIAB_TEAM_BOARD_ID"), "B-1");
+        // The clone URL is derived from the repo id, so the two cannot drift apart.
+        assert_eq!(
+            value("WIAB_TEAM_REPO_REMOTE"),
+            "https://wiab.example/repos/R-7.git"
+        );
+        // The API token is a credential shared by every team; it reaches the container
+        // through the backend's own environment, not through here.
+        assert!(!env.iter().any(|(key, _)| key.contains("TOKEN")));
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_api_url_does_not_double_up() {
+        let team = TeamSnapshot {
+            id: "TM-1".to_owned(),
+            organization_id: "O-1".to_owned(),
+            name: "platform".to_owned(),
+            description: String::new(),
+            board_id: "B-2".to_owned(),
+            repo_id: "R-3".to_owned(),
+            vm_template: "developer".to_owned(),
+            state: "starting".to_owned(),
+            vm_id: None,
+        };
+        let env = worker_env(&team, "https://wiab.example/");
+        let value = |key: &str| {
+            env.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+        };
+        assert_eq!(value("WIAB_TEAM_API_URL"), "https://wiab.example");
+        assert_eq!(
+            value("WIAB_TEAM_REPO_REMOTE"),
+            "https://wiab.example/repos/R-3.git"
+        );
     }
 }

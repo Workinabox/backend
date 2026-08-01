@@ -7,6 +7,10 @@ pub struct TeamSnapshot {
     pub organization_id: String,
     pub name: String,
     pub description: String,
+    /// Where the team's work queues up.
+    pub board_id: String,
+    /// The codebase the team works in.
+    pub repo_id: String,
     pub vm_template: String,
     pub state: String,
     /// Set while the team has a container; `None` once stopped.

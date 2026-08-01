@@ -151,6 +151,8 @@ impl<A: AgentRepository, O: OrganizationRepository, V: VmProvisioning>
             template: template.name().to_owned(),
             vcpus: None,
             mem_mib: None,
+            // An agent's container is configured entirely from the backend's own environment.
+            env: Vec::new(),
         };
         let Some(vm) = self
             .vm

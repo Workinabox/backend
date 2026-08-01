@@ -201,6 +201,11 @@ impl FirecrackerRuntime {
                 env.push_str(&format!("{key}={value}\n"));
             }
         }
+        // Owner-specific settings last, so a team's own board and repo win over anything the
+        // backend's environment happened to set.
+        for (key, value) in &spec.env {
+            env.push_str(&format!("{key}={value}\n"));
+        }
         std::fs::write(stage.join("agent.env"), env).map_err(ioerr)?;
         // mke2fs -d populates directly from the staging dir (no mount/root).
         run(Command::new("truncate").args(["-s", "64M", &out.to_string_lossy()])).await?;
