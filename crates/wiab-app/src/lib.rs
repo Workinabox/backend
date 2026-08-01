@@ -20,6 +20,8 @@ mod pull_request_application_service;
 mod pull_request_requests;
 mod repo_application_service;
 mod repo_requests;
+mod team_application_service;
+mod team_requests;
 mod user_application_service;
 mod user_requests;
 mod vm_application_service;
@@ -52,6 +54,8 @@ pub use repo_application_service::RepoApplicationService;
 pub use repo_requests::{
     CommitChangesRequest, CreateRepoRequest, SetVisibilityRequest, UpdateRepoRequest,
 };
+pub use team_application_service::TeamApplicationService;
+pub use team_requests::CreateTeamRequest;
 pub use user_application_service::UserApplicationService;
 pub use user_requests::{
     AddSshKeyRequest, CreateUserRequest, IssueTokenRequest, IssuedTokenSnapshot,
