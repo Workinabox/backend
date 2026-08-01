@@ -9,10 +9,15 @@
 use wiab_core::organization::{Organization, OrganizationId, OrganizationRepository};
 use wiab_core::project::ProjectId;
 use wiab_core::repository::{SaveError, Version};
+use wiab_core::team::{Team, TeamId, TeamRepository, TeamState};
 use wiab_core::user::{SshKey, SshKeyId, User, UserId, UserKind, UserRepository};
+use wiab_core::vm::{VmId, VmTemplate};
 use wiab_core::work::{Work, WorkId, WorkRepository};
 use wiab_inf::pg_pool;
-use wiab_inf::{PostgresOrganizationRepository, PostgresUserRepository, PostgresWorkRepository};
+use wiab_inf::{
+    PostgresOrganizationRepository, PostgresTeamRepository, PostgresUserRepository,
+    PostgresWorkRepository,
+};
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL pointing at a live Postgres"]
@@ -39,7 +44,7 @@ async fn postgres_persistence_end_to_end() {
         .expect("client")
         .batch_execute(
             "TRUNCATE organization, project, agent, board, repo, pipeline, work, work_done, \
-             app_user, user_ssh_key, user_access_token, role_assignment",
+             app_user, user_ssh_key, user_access_token, role_assignment, team",
         )
         .await
         .expect("truncate");
@@ -134,6 +139,34 @@ async fn postgres_persistence_end_to_end() {
     assert_eq!(user_back.ssh_keys().len(), 1);
     assert_eq!(user_back.ssh_keys()[0].label(), "laptop");
     assert_eq!(user_back.name(), "Alice");
+
+    // --- Team: the lifecycle columns (state, vm_id) must survive a round-trip. ---
+    let teams = PostgresTeamRepository::new(pool.clone());
+    let mut team = Team::new(
+        TeamId::from_number(1),
+        OrganizationId::from_number(1),
+        "platform".into(),
+        "the platform team".into(),
+        VmTemplate::new("developer".to_owned()).unwrap(),
+    )
+    .unwrap();
+    let team_v1 = teams
+        .save(team.clone(), Version::NEW)
+        .await
+        .expect("insert");
+
+    team.start().unwrap();
+    team.mark_idle(VmId::from_number(5)).unwrap();
+    teams.save(team, team_v1).await.expect("update team");
+
+    let (team_back, _) = teams
+        .get(&TeamId::from_number(1))
+        .await
+        .unwrap()
+        .expect("team present");
+    assert_eq!(team_back.state(), TeamState::Idle);
+    assert_eq!(team_back.vm_id(), Some(VmId::from_number(5)));
+    assert_eq!(teams.list().await.unwrap().len(), 1);
 
     // --- Durability across a fresh pool (proxy for a process restart). ---
     drop(orgs);
