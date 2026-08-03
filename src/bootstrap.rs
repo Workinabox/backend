@@ -68,24 +68,15 @@ use wiab_inf::{
 /// driving it, so seconds of lag cost nothing and a tighter loop would just poll harder.
 const OUTBOX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Login email of the bootstrap Owner seeded into an empty store.
+const SEED_OWNER_EMAIL: &str = "owner@workinabox.local";
+
 pub async fn build_app_state(
     config: &crate::config::AppConfig,
     certificate_pem: Option<String>,
 ) -> anyhow::Result<AppState> {
     let persistence = &config.serve.persistence;
     let database_url = &config.serve.database_url;
-    let seed_clock = SystemClock;
-    let meeting_repository = InMemoryMeetingRepository::with_seed_data(|| seed_clock.now_rfc3339());
-    let intelligence = load_meeting_intelligence(&config.meeting)?;
-    let meeting_service = Arc::new(MeetingApplicationService::new(
-        meeting_repository.clone(),
-        intelligence,
-        Arc::new(DefaultSpeechSynthesizer::from_env()),
-        Arc::new(SystemClock),
-    ));
-
-    log_loaded_meetings(meeting_service.as_ref()).await;
-
     // Choose the persistence backend from config. Meeting state is always in-memory
     // (ephemeral live sessions); every other aggregate is backed by the selected store.
     let pool = match persistence.trim().to_ascii_lowercase().as_str() {
@@ -364,6 +355,31 @@ pub async fn build_app_state(
         &config.dev,
     )
     .await?;
+
+    // Meetings are in-memory (ephemeral live sessions), but a seeded meeting needs its owner to
+    // be a real user — a human seat is bound to the user entitled to occupy it. So the meeting
+    // store is built here, after the owner exists, rather than at the top of bootstrap.
+    let seed_clock = SystemClock;
+    let meeting_repository = match user_service.find_by_email(SEED_OWNER_EMAIL).await? {
+        Some(owner) => {
+            InMemoryMeetingRepository::with_seed_data(owner, || seed_clock.now_rfc3339())
+        }
+        None => {
+            info!(
+                "no '{SEED_OWNER_EMAIL}' user; starting with no seeded meeting (nothing to own it)"
+            );
+            InMemoryMeetingRepository::new()
+        }
+    };
+    let intelligence = load_meeting_intelligence(&config.meeting)?;
+    let meeting_service = Arc::new(MeetingApplicationService::new(
+        meeting_repository.clone(),
+        intelligence,
+        Arc::new(DefaultSpeechSynthesizer::from_env()),
+        Arc::new(SystemClock),
+    ));
+
+    log_loaded_meetings(meeting_service.as_ref()).await;
 
     let pipeline_repo = match &pool {
         Some(pool) => PipelineRepo::Postgres(PostgresPipelineRepository::new(pool.clone())),
@@ -650,7 +666,7 @@ async fn seed_owner(
         .create_user(CreateUserRequest {
             kind: "human".to_owned(),
             name: "Owner".to_owned(),
-            email: Some("owner@workinabox.local".to_owned()),
+            email: Some(SEED_OWNER_EMAIL.to_owned()),
         })
         .await
         .expect("failed to seed owner user");
