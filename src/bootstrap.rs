@@ -342,8 +342,9 @@ pub async fn build_app_state(
             access_service.as_ref(),
             auth_service.as_ref(),
             &config.dev,
+            &config.auth.base_url,
         )
-        .await;
+        .await?;
     }
 
     // Pre-provision a dev SSO user (env-gated, idempotent) so a real Entra/OIDC login lands
@@ -653,15 +654,23 @@ async fn seed_default_organization(
     Ok(())
 }
 
-/// Seeds an initial Owner user for the default org and logs a one-time access token, so
-/// there is a way to authenticate before the real identity provider exists. Re-seeded each
-/// boot because metadata is in-memory.
+/// Seeds an initial Owner user for the default org, so there is a way to authenticate before
+/// the real identity provider exists. Re-seeded each boot because metadata is in-memory.
+///
+/// Neither the password nor the token is logged. They are credentials for a full administrator,
+/// and the structured log is shipped, aggregated, and readable by anyone with log access — a
+/// place a non-expiring admin token outlives every session that ever used it. The token is
+/// short-lived and written to `WIAB_BOOTSTRAP_TOKEN_FILE` (0600) instead.
 async fn seed_owner(
     user_service: &UserApplicationService<UserRepo>,
     access_service: &AccessApplicationService<RoleAssignmentRepo, UserRepo>,
     auth_service: &WiabAuthService,
     dev: &crate::config::DevConfig,
-) {
+    base_url: &str,
+) -> anyhow::Result<()> {
+    let (password, is_default) =
+        crate::config::seed_owner_password(dev.owner_password.as_deref(), base_url)?;
+
     let owner = user_service
         .create_user(CreateUserRequest {
             kind: "human".to_owned(),
@@ -687,23 +696,76 @@ async fn seed_owner(
                 read_only: false,
                 repos: None,
                 orgs: None,
-                expires_at: None,
+                // Long enough to bootstrap with, short enough that a leaked copy is worthless
+                // by the time anyone finds it.
+                expires_at: Some(authbox_core::Clock::rfc3339_in(
+                    &SystemClock,
+                    BOOTSTRAP_TOKEN_TTL_SECONDS,
+                )),
             },
         )
         .await
         .expect("failed to issue bootstrap token")
         .expect("seeded owner exists");
     // Seed a password so a human can log in interactively (the bootstrap token above stays
-    // for machine/agent access). Dev-only default; override with WIAB_DEV_OWNER_PASSWORD.
-    let dev_password = &dev.owner_password;
+    // for machine/agent access).
     auth_service
-        .set_password(PrincipalId::new(owner.id.clone()), dev_password)
+        .set_password(PrincipalId::new(owner.id.clone()), &password)
         .await
         .expect("failed to seed owner password");
+
     info!(
-        "seeded owner '{}' (Owner of O-1) — login: owner@workinabox.local / {} — bootstrap access token: {}",
-        owner.id, dev_password, issued.plaintext
+        "seeded owner '{}' (Owner of O-1) — login: {SEED_OWNER_EMAIL}",
+        owner.id
     );
+    if is_default {
+        info!("owner password is the local development default; set WIAB_DEV_OWNER_PASSWORD");
+    }
+    write_bootstrap_token(&issued.plaintext)?;
+    Ok(())
+}
+
+/// How long the seeded bootstrap token stays valid.
+const BOOTSTRAP_TOKEN_TTL_SECONDS: i64 = 3600;
+
+/// Writes the bootstrap token where an operator can pick it up, owner-readable only, instead of
+/// logging it. A no-op unless `WIAB_BOOTSTRAP_TOKEN_FILE` names a path — without one the token
+/// simply expires unused, which is the safe default.
+fn write_bootstrap_token(plaintext: &str) -> anyhow::Result<()> {
+    let Some(path) = std::env::var("WIAB_BOOTSTRAP_TOKEN_FILE")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        info!(
+            "bootstrap token issued (valid {}s); set WIAB_BOOTSTRAP_TOKEN_FILE to capture it",
+            BOOTSTRAP_TOKEN_TTL_SECONDS
+        );
+        return Ok(());
+    };
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("failed to open bootstrap token file {path}"))?;
+        file.write_all(plaintext.as_bytes())
+            .with_context(|| format!("failed to write bootstrap token file {path}"))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, plaintext)
+        .with_context(|| format!("failed to write bootstrap token file {path}"))?;
+
+    info!(
+        "bootstrap token written to {path} (valid {}s)",
+        BOOTSTRAP_TOKEN_TTL_SECONDS
+    );
+    Ok(())
 }
 
 /// Pre-provisions a dev SSO user (Active + Owner of O-1) from env, so a real Entra/OIDC
