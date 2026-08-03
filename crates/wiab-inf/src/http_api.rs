@@ -1963,23 +1963,34 @@ async fn signup(
             "password must be at least 8 characters".to_owned(),
         ));
     }
-    // A taken email is not reported — same 202 either way.
-    if let Ok(snapshot) = state
+    // A taken email is not reported — same 202 either way. The taken branch still spends the
+    // password-hashing cost, because a 202 that returns noticeably faster answers the question
+    // the identical status code was there to refuse.
+    match state
         .user_service
         .create_pending_user(request.name, request.email.clone())
         .await
     {
-        let principal = PrincipalId::new(snapshot.id);
-        state
-            .auth_service
-            .set_password(principal.clone(), &request.password)
-            .await
-            .map_err(internal)?;
-        state
-            .invitation_service
-            .send_email_verification(&request.email, principal)
-            .await
-            .map_err(internal)?;
+        Ok(snapshot) => {
+            let principal = PrincipalId::new(snapshot.id);
+            state
+                .auth_service
+                .set_password(principal.clone(), &request.password)
+                .await
+                .map_err(internal)?;
+            state
+                .invitation_service
+                .send_email_verification(&request.email, principal)
+                .await
+                .map_err(internal)?;
+        }
+        Err(_) => {
+            state
+                .auth_service
+                .spend_password_cost(&request.password)
+                .await
+                .map_err(internal)?;
+        }
     }
     Ok(StatusCode::ACCEPTED)
 }
