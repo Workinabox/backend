@@ -70,7 +70,13 @@ async fn main() -> anyhow::Result<()> {
 
     let state = bootstrap::build_app_state(&config, certificate_pem).await?;
 
-    // Git SSH transport runs on its own port alongside the HTTPS server.
+    // Git SSH transport runs on its own port alongside the HTTPS server. Checked before the
+    // server starts, not inside the spawned task, so an unusable configuration stops the
+    // process rather than being logged and ignored.
+    wiab::config::require_persistent_ssh_host_key(
+        config.serve.git_ssh_host_key.as_deref(),
+        &config.auth.base_url,
+    )?;
     let ssh_addr = config.serve.git_ssh_addr.clone();
     let ssh_host_key = config.serve.git_ssh_host_key.clone();
     {
