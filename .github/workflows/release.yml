@@ -5,13 +5,18 @@ on:
     tags:
       - 'v*'
 
+# Read by default; only the two jobs that touch the release itself get write. The build job
+# compiles the tree and needs no token at all, so a compromised build step cannot push a tag,
+# a commit, or a release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.get_version.outputs.version }}
       tag: ${{ steps.get_tag.outputs.tag }}
@@ -31,11 +36,14 @@ jobs:
       - name: Create GitHub Release (generate notes, mark latest)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through env, not interpolated into the script below: these derive from the
+          # pushed git tag, so a crafted tag name would otherwise be substituted into bash
+          # before the shell ever sees it as data.
+          TAG: ${{ steps.get_tag.outputs.tag }}
+          VERSION: ${{ steps.get_version.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.get_tag.outputs.tag }}"
-          VERSION="${{ steps.get_version.outputs.version }}"
           NOTES_FILE="${RUNNER_TEMP}/release-notes-${TAG}.md"
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="$TAG" \
@@ -60,6 +68,8 @@ jobs:
     name: Build
     needs: create-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     container:
       image: rust:1.92-bookworm
     env:
@@ -139,6 +149,8 @@ jobs:
           fi
 
       - name: Package binary
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -149,11 +161,11 @@ jobs:
           cp wiab pkg/
           libdir="$(dirname "$(find "$PWD/build" -path '*llama-cpp-sys-2-*/out/lib/libllama.so*' | head -1)")"
           cp -P "$libdir"/libllama.so* "$libdir"/libggml*.so* pkg/lib/
-          tar czf wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.tar.gz -C pkg wiab lib
-          sha256sum pkg/wiab | sed 's# .*# wiab#' > wiab-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
+          tar czf "wiab-v${VERSION}-x86_64-linux-gnu.tar.gz" -C pkg wiab lib
+          sha256sum pkg/wiab | sed 's# .*# wiab#' > "wiab-v${VERSION}-x86_64-linux-gnu.sha256"
           # Guest agent: a self-contained binary staged to the demo and mounted into each microVM.
-          cp wiab-agent wiab-agent-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu
-          sha256sum wiab-agent | sed 's# .*# wiab-agent#' > wiab-agent-v${{ needs.create-release.outputs.version }}-x86_64-linux-gnu.sha256
+          cp wiab-agent "wiab-agent-v${VERSION}-x86_64-linux-gnu"
+          sha256sum wiab-agent | sed 's# .*# wiab-agent#' > "wiab-agent-v${VERSION}-x86_64-linux-gnu.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -170,6 +182,8 @@ jobs:
     name: Upload
     needs: [create-release, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -180,6 +194,7 @@ jobs:
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -189,4 +204,4 @@ jobs:
             echo "No release assets found; skipping upload."
             exit 0
           fi
-          gh release upload "${{ needs.create-release.outputs.tag }}" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
