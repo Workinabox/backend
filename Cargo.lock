@@ -381,6 +381,7 @@ dependencies = [
  "anyhow",
  "authbox-core",
  "serde",
+ "subtle",
  "tokio",
 ]
 
