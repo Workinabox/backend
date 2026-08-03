@@ -301,6 +301,23 @@ impl UserRepository for UserRepo {
             Self::Postgres(repo) => repo.list().await,
         }
     }
+
+    async fn find_id_by_token_hash(&self, hash: &str) -> Result<Option<UserId>, RepoError> {
+        match self {
+            Self::InMemory(repo) => repo.find_id_by_token_hash(hash).await,
+            Self::Postgres(repo) => repo.find_id_by_token_hash(hash).await,
+        }
+    }
+
+    async fn find_id_by_ssh_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<UserId>, RepoError> {
+        match self {
+            Self::InMemory(repo) => repo.find_id_by_ssh_fingerprint(fingerprint).await,
+            Self::Postgres(repo) => repo.find_id_by_ssh_fingerprint(fingerprint).await,
+        }
+    }
 }
 
 #[derive(Clone)]

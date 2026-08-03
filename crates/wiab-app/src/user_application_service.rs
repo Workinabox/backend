@@ -294,14 +294,7 @@ impl<U: UserRepository> UserApplicationService<U> {
         plaintext: &str,
     ) -> anyhow::Result<Option<(UserId, TokenScope)>> {
         let hash = self.token_hasher.hash(plaintext);
-        let id = {
-            let users = self.user_repository.list().await?;
-            users
-                .into_iter()
-                .find(|user| user.token_by_hash(&hash).is_some())
-                .map(|user| user.id())
-        };
-        let Some(id) = id else {
+        let Some(id) = self.user_repository.find_id_by_token_hash(&hash).await? else {
             return Ok(None);
         };
         loop {
@@ -335,11 +328,10 @@ impl<U: UserRepository> UserApplicationService<U> {
         &self,
         fingerprint: &str,
     ) -> anyhow::Result<Option<UserId>> {
-        let users = self.user_repository.list().await?;
-        Ok(users
-            .into_iter()
-            .find(|user| user.ssh_key_by_fingerprint(fingerprint).is_some())
-            .map(|user| user.id()))
+        Ok(self
+            .user_repository
+            .find_id_by_ssh_fingerprint(fingerprint)
+            .await?)
     }
 }
 
@@ -408,6 +400,28 @@ mod tests {
                 .values()
                 .map(|(user, _)| user.clone())
                 .collect())
+        }
+        async fn find_id_by_token_hash(&self, hash: &str) -> Result<Option<UserId>, RepoError> {
+            Ok(self.lowest_id_matching(|user| user.token_by_hash(hash).is_some()))
+        }
+        async fn find_id_by_ssh_fingerprint(
+            &self,
+            fingerprint: &str,
+        ) -> Result<Option<UserId>, RepoError> {
+            Ok(self.lowest_id_matching(|user| user.ssh_key_by_fingerprint(fingerprint).is_some()))
+        }
+    }
+
+    impl TestUserRepository {
+        /// Matches the production repositories: lowest id, not first found.
+        fn lowest_id_matching(&self, predicate: impl Fn(&User) -> bool) -> Option<UserId> {
+            self.users
+                .read()
+                .unwrap()
+                .values()
+                .filter(|(user, _)| predicate(user))
+                .map(|(user, _)| user.id())
+                .min_by_key(|id| id.number())
         }
     }
 

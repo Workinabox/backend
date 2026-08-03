@@ -14,7 +14,9 @@ use wiab_core::repo::RepoId;
 use wiab_core::repository::{SaveError, Version};
 use wiab_core::task::{Task, TaskId, TaskRepository, TaskState};
 use wiab_core::team::{Team, TeamId, TeamRepository, TeamState};
-use wiab_core::user::{SshKey, SshKeyId, User, UserId, UserKind, UserRepository};
+use wiab_core::user::{
+    AccessToken, SshKey, SshKeyId, TokenId, TokenScope, User, UserId, UserKind, UserRepository,
+};
 use wiab_core::vm::{VmId, VmTemplate};
 use wiab_core::work::{Work, WorkId, WorkRepository};
 use wiab_inf::pg_pool;
@@ -138,11 +140,50 @@ async fn postgres_persistence_end_to_end() {
         )
         .unwrap(),
     );
+    user.add_token(
+        AccessToken::new(
+            TokenId::new(),
+            "ci".into(),
+            "hash-of-a-token".into(),
+            "wiab_pat_…abcd".into(),
+            "2026-01-01T00:00:00Z".into(),
+            None,
+            TokenScope::unrestricted(),
+        )
+        .unwrap(),
+    );
     users.save(user, Version::NEW).await.expect("insert user");
     let (user_back, _) = users.get(&UserId::from_number(1)).await.unwrap().unwrap();
     assert_eq!(user_back.ssh_keys().len(), 1);
     assert_eq!(user_back.ssh_keys()[0].label(), "laptop");
     assert_eq!(user_back.name(), "Alice");
+
+    // The indexed credential lookups the auth path uses (V21). Only exercised here: the SQL
+    // and column names are otherwise never executed, so a typo would compile and ship.
+    assert_eq!(
+        users
+            .find_id_by_token_hash("hash-of-a-token")
+            .await
+            .unwrap(),
+        Some(UserId::from_number(1)),
+        "a token hash resolves to its owner"
+    );
+    assert_eq!(
+        users
+            .find_id_by_ssh_fingerprint("SHA256:abc")
+            .await
+            .unwrap(),
+        Some(UserId::from_number(1)),
+        "an SSH fingerprint resolves to its owner"
+    );
+    assert_eq!(users.find_id_by_token_hash("absent").await.unwrap(), None);
+    assert_eq!(
+        users
+            .find_id_by_ssh_fingerprint("SHA256:absent")
+            .await
+            .unwrap(),
+        None
+    );
 
     // --- Team: the lifecycle columns (state, vm_id) must survive a round-trip. ---
     let teams = PostgresTeamRepository::new(pool.clone());
