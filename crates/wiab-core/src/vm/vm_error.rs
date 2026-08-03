@@ -4,6 +4,11 @@ use thiserror::Error;
 pub enum VmError {
     #[error("vm template must be a non-empty trimmed string")]
     EmptyTemplate,
+    #[error(
+        "'{0}' is not a valid vm template name (lowercase letters, digits, '.', '_' and '-', \
+         starting with a letter or digit)"
+    )]
+    InvalidTemplate(String),
     #[error("'{0}' is not a valid vm id")]
     InvalidVmId(String),
     #[error("'{0}' is not an agent or team id, so no vm can be booted for it")]

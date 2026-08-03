@@ -138,6 +138,8 @@ struct RepoFixture {
     public_repo: String,
     member_token: String,
     stranger_token: String,
+    /// Holds Write on `O-1`, for the endpoints that mutate rather than read.
+    owner_token: String,
 }
 
 async fn repo_fixture() -> RepoFixture {
@@ -205,6 +207,7 @@ async fn repo_fixture() -> RepoFixture {
     };
     let member_token = user("member", Some(Role::Read)).await;
     let stranger_token = user("stranger", None).await;
+    let owner_token = user("owner", Some(Role::Owner)).await;
 
     RepoFixture {
         router: wiab_inf::http_router(state),
@@ -212,6 +215,7 @@ async fn repo_fixture() -> RepoFixture {
         public_repo,
         member_token,
         stranger_token,
+        owner_token,
     }
 }
 
@@ -433,6 +437,39 @@ async fn repeated_logins_from_one_address_are_throttled() {
         StatusCode::TOO_MANY_REQUESTS,
         "another address must not inherit the first one's limit"
     );
+}
+
+/// A VM template name becomes a filesystem path under Firecracker and a container image
+/// reference under Docker. Both are built by interpolation, so an unvalidated name lets an
+/// org member mount an arbitrary host file into a guest, or make the backend pull and run an
+/// image from a registry of their choosing (M4).
+#[tokio::test]
+async fn a_hostile_vm_template_is_refused_before_it_reaches_a_runtime() {
+    let fixture = repo_fixture().await;
+    for hostile in ["../../etc/passwd", "evil.registry.com/x", "base@sha256:abc"] {
+        let body = format!(r#"{{"name":"probe","description":"","vm_type":"{hostile}"}}"#);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/organizations/O-1/agents")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", fixture.owner_token),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("valid request");
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "vm_type {hostile:?} must be refused"
+        );
+    }
 }
 
 #[tokio::test]
