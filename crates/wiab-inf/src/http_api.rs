@@ -2421,8 +2421,16 @@ fn not_found(what: &str, id: &str) -> (StatusCode, String) {
     (StatusCode::NOT_FOUND, format!("{what} '{id}' not found"))
 }
 
-async fn signal(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_signal_socket(state.sfu, socket))
+/// Resolves the caller *before* the upgrade, so an unauthenticated client is refused at the
+/// handshake rather than after it holds a socket, and binds the identity to the socket for its
+/// whole life — every seat it takes is resolved from this user.
+async fn signal(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let (user, _scope) = authenticate(&state, &headers).await?;
+    Ok(ws.on_upgrade(move |socket| handle_signal_socket(state.sfu, user, socket)))
 }
 
 #[cfg(test)]
