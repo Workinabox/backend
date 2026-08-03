@@ -86,7 +86,9 @@ pub struct EmailConfig {
 
 /// Dev-only seeding conveniences (owner password + optional pre-provisioned SSO owner).
 pub struct DevConfig {
-    pub owner_password: String,
+    /// `WIAB_DEV_OWNER_PASSWORD`. There is no default: a baked-in one is a published
+    /// credential, and `seed_owner_password` refuses to invent one outside local development.
+    pub owner_password: Option<String>,
     pub sso_owner_email: String,
     pub sso_owner_name: String,
     pub sso_owner_password: Option<String>,
@@ -166,7 +168,9 @@ impl AppConfig {
                 let sso_owner_name = std::env::var("WIAB_DEV_SSO_OWNER_NAME")
                     .unwrap_or_else(|_| sso_owner_email.clone());
                 DevConfig {
-                    owner_password: env_or("WIAB_DEV_OWNER_PASSWORD", "owner"),
+                    owner_password: std::env::var("WIAB_DEV_OWNER_PASSWORD")
+                        .ok()
+                        .filter(|p| !p.is_empty()),
                     sso_owner_email,
                     sso_owner_name,
                     sso_owner_password: std::env::var("WIAB_DEV_SSO_OWNER_PASSWORD")
@@ -191,6 +195,42 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
+/// The password to seed the bootstrap Owner with, or an error refusing to invent one.
+///
+/// The convenience default this replaces was a published credential: any deployment that did
+/// not set `WIAB_DEV_OWNER_PASSWORD` shipped with `owner/owner` as a full administrator. It is
+/// only safe where nobody but the developer can reach the host, so it survives for a local
+/// base URL and nowhere else.
+pub fn seed_owner_password(
+    configured: Option<&str>,
+    base_url: &str,
+) -> anyhow::Result<(String, bool)> {
+    match configured {
+        Some(password) => Ok((password.to_owned(), false)),
+        None if is_local_base_url(base_url) => Ok((LOCAL_DEV_OWNER_PASSWORD.to_owned(), true)),
+        None => anyhow::bail!(
+            "refusing to seed the bootstrap owner with a default password for a non-local \
+             deployment ({base_url}): set WIAB_DEV_OWNER_PASSWORD"
+        ),
+    }
+}
+
+/// Password used for the seeded owner when developing against a local base URL.
+const LOCAL_DEV_OWNER_PASSWORD: &str = "owner";
+
+/// Whether the advertised base URL points at the developer's own machine.
+fn is_local_base_url(base_url: &str) -> bool {
+    let host = base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let host = host.split(':').next().unwrap_or(host);
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
 /// Reads a boolean env flag (`1`/`true`/`yes`/`on` = true), defaulting to false when unset.
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -201,4 +241,46 @@ fn env_flag(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_non_local_deployment_refuses_to_invent_an_owner_password() {
+        let error = seed_owner_password(None, "https://wiab.example.com")
+            .expect_err("a deployed backend must not seed a published default credential");
+        assert!(
+            error.to_string().contains("WIAB_DEV_OWNER_PASSWORD"),
+            "the error should say how to fix it: {error}"
+        );
+    }
+
+    #[test]
+    fn local_development_keeps_its_default() {
+        let (password, is_default) =
+            seed_owner_password(None, "http://localhost:3000").expect("local dev is allowed");
+        assert_eq!(password, LOCAL_DEV_OWNER_PASSWORD);
+        assert!(is_default);
+    }
+
+    #[test]
+    fn a_configured_password_is_used_everywhere() {
+        for base_url in ["http://localhost:3000", "https://wiab.example.com"] {
+            let (password, is_default) =
+                seed_owner_password(Some("s3cret"), base_url).expect("an explicit password works");
+            assert_eq!(password, "s3cret");
+            assert!(!is_default);
+        }
+    }
+
+    #[test]
+    fn only_loopback_hosts_count_as_local() {
+        assert!(is_local_base_url("http://localhost:3000"));
+        assert!(is_local_base_url("http://127.0.0.1:8080/"));
+        assert!(!is_local_base_url("https://wiab.example.com"));
+        // A host that merely mentions localhost is not localhost.
+        assert!(!is_local_base_url("https://localhost.evil.com"));
+    }
 }
