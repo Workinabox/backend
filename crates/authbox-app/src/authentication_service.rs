@@ -15,10 +15,22 @@ pub struct SessionConfig {
 
 /// Returned once when a session is established: the plaintext cookie secret to set on the
 /// browser and the CSRF token to hand the SPA. Only their hashes are persisted.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EstablishedSession {
     pub cookie_secret: String,
     pub csrf_token: String,
+}
+
+/// Redacting `Debug`: both fields are live session credentials. Nothing logs them today, but
+/// `Debug` is what a future `{:?}` or error context would reach for, and by then the secret is
+/// in the log.
+impl std::fmt::Debug for EstablishedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EstablishedSession")
+            .field("cookie_secret", &"<redacted>")
+            .field("csrf_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The outcome of resolving a session cookie: the authenticated principal and the stored
@@ -237,6 +249,17 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+
+    #[test]
+    fn debug_never_prints_the_session_secrets() {
+        let session = EstablishedSession {
+            cookie_secret: "c00kie".to_owned(),
+            csrf_token: "csrft0ken".to_owned(),
+        };
+        let rendered = format!("{session:?}");
+        assert!(!rendered.contains("c00kie"), "Debug leaked: {rendered}");
+        assert!(!rendered.contains("csrft0ken"), "Debug leaked: {rendered}");
+    }
 
     #[derive(Default)]
     struct FakeDirectory {
