@@ -16,6 +16,23 @@ permissions:
   contents: read
 
 jobs:
+  # Dependency advisories. The reason the advisories in the security review drifted for a month
+  # is that nothing was watching; this fails the build on a new one. Exceptions live in
+  # .cargo/audit.toml and each carries a written justification.
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
