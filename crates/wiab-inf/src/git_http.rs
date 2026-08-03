@@ -228,7 +228,7 @@ async fn authorize_git(
             .repo_service
             .repo_visibility(&rid)
             .await
-            .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()).into_response())?;
+            .map_err(backend_failure)?;
         if visibility == Some(Visibility::Public) {
             return Ok(());
         }
@@ -241,7 +241,7 @@ async fn authorize_git(
         .user_service
         .resolve_token(&token)
         .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?
+        .map_err(backend_failure)?
     else {
         return Err(unauthorized());
     };
@@ -250,7 +250,7 @@ async fn authorize_git(
         .authorization_service
         .authorize(user, repo, operation, Some(&scope))
         .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response())?;
+        .map_err(backend_failure)?;
     if allowed { Ok(()) } else { Err(forbidden()) }
 }
 
@@ -289,18 +289,42 @@ fn not_found(repo: &str) -> Response {
     (StatusCode::NOT_FOUND, format!("repo '{repo}' not found")).into_response()
 }
 
-fn spawn_error(err: std::io::Error) -> Response {
+/// A backend failure while authorizing, without the underlying error text — a repo lookup or
+/// token resolution failure names the database and on-disk layout.
+fn backend_failure(err: impl std::fmt::Display) -> Response {
+    let error_id = uuid::Uuid::new_v4();
+    tracing::error!(%error_id, error = %err, "git authorization failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("failed to run git: {err}"),
+        format!("internal error (reference: {error_id})"),
     )
         .into_response()
 }
 
-fn spawn_failure(verb: &str, stderr: &[u8]) -> Response {
+fn spawn_error(err: std::io::Error) -> Response {
+    let error_id = uuid::Uuid::new_v4();
+    tracing::error!(%error_id, error = %err, "failed to run git");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("git {verb} failed: {}", String::from_utf8_lossy(stderr)),
+        format!("failed to run git (reference: {error_id})"),
+    )
+        .into_response()
+}
+
+/// A failed `git` subprocess, without handing its stderr to the client — that output names the
+/// repository's path on disk and the server's git version. The detail is logged against a
+/// correlation id instead.
+fn spawn_failure(verb: &str, stderr: &[u8]) -> Response {
+    let error_id = uuid::Uuid::new_v4();
+    tracing::error!(
+        %error_id,
+        verb,
+        stderr = %String::from_utf8_lossy(stderr),
+        "git subprocess failed"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("git {verb} failed (reference: {error_id})"),
     )
         .into_response()
 }
@@ -316,6 +340,27 @@ fn pkt_line(payload: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_failed_git_subprocess_does_not_return_its_stderr() {
+        let response = spawn_failure(
+            "upload-pack",
+            b"fatal: '/var/lib/wiab/git/R-1.git' does not appear to be a git repository",
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .to_vec(),
+        )
+        .expect("utf8");
+        assert!(body.contains("reference:"), "{body}");
+        assert!(
+            !body.contains("/var/lib/wiab"),
+            "the 500 body leaked the on-disk path: {body}"
+        );
+    }
 
     #[test]
     fn pkt_line_prefixes_hex_length() {
