@@ -1,33 +1,13 @@
-mod bootstrap;
-mod config;
-
 use std::net::SocketAddr;
 
 use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
-use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
+use clap::{CommandFactory, FromArgMatches, parser::ValueSource};
 use tracing::{info, warn};
+use wiab::Cli;
+use wiab::bootstrap;
+use wiab::config::{AppConfig, ServeConfig};
 use wiab_inf::{http_router, spawn_git_ssh_server};
-
-use crate::config::{AppConfig, ServeConfig};
-
-/// Backend configuration. Each value defaults to a baked-in dev value, can be overridden by
-/// an environment variable, and can be overridden again by a command-line flag (which wins).
-#[derive(Parser, Debug)]
-#[command(name = "wiab")]
-struct Cli {
-    /// Persistence backend: "postgres" or "memory".
-    #[arg(long, env = "WIAB_PERSISTENCE", default_value = "postgres")]
-    persistence: String,
-
-    /// Postgres connection URL (used when persistence is "postgres").
-    #[arg(
-        long,
-        env = "DATABASE_URL",
-        default_value = "postgres://wiab:wiab@localhost:5432/wiab"
-    )]
-    database_url: String,
-}
 
 /// Describe where a parsed value came from, so the console shows whether a default was
 /// overridden by an env var or a CLI flag.
