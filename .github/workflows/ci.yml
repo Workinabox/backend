@@ -92,7 +92,9 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       mailpit:
-        image: axllent/mailpit
+        # Pinned like its siblings below: an unpinned tag makes the run non-reproducible and
+        # silently takes whatever upstream published last.
+        image: axllent/mailpit:v1.30.6
       oidc-mock:
         image: ghcr.io/navikt/mock-oauth2-server:2.1.10
     steps:
