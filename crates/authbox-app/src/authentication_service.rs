@@ -269,6 +269,9 @@ mod tests {
         async fn find_by_email(&self, email: &str) -> Result<Option<PrincipalId>, AuthError> {
             Ok(self.by_email.get(email).map(PrincipalId::new))
         }
+        async fn may_authenticate(&self, _principal: &PrincipalId) -> Result<bool, AuthError> {
+            Ok(true)
+        }
         async fn provision(&self, _email: &str, _name: &str) -> Result<PrincipalId, AuthError> {
             Err(AuthError::Backend(
                 "provision not used in this test".to_owned(),

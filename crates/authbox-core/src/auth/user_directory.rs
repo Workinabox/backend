@@ -14,4 +14,11 @@ pub trait UserDirectory: Send + Sync + 'static {
     /// Just-in-time provision a new user from verified federated claims, returning its
     /// principal. Called only when no existing user matches (social/SSO first login).
     async fn provision(&self, email: &str, name: &str) -> Result<PrincipalId, AuthError>;
+
+    /// Whether an already-identified principal is still permitted to authenticate.
+    ///
+    /// `find_by_email` answers this for the paths that go through it, but a federated login
+    /// with an existing identity link never looks up an email — it has the principal already.
+    /// Without this check, deactivating a user would not off-board anyone who had linked SSO.
+    async fn may_authenticate(&self, principal: &PrincipalId) -> Result<bool, AuthError>;
 }
