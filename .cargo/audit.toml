@@ -1,0 +1,29 @@
+# Exceptions for `cargo audit`. Every entry needs a written reason: the point of running the
+# audit in CI is that a new advisory fails the build, and an undocumented ignore quietly
+# converts that back into silence.
+#
+# Only advisories that cannot be fixed from this repository belong here. Anything with a
+# patched release available should be updated instead.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack: potential key recovery through timing sidechannels"
+    # in `rsa`, reached twice: via `openidconnect` (RS256 JWT/JWKS signature verification) and
+    # via `russh`/`ssh-key` (SSH public-key auth).
+    #
+    # No patched release exists, so this cannot be closed by updating. Accepted because the
+    # attack needs the PKCS#1 v1.5 *decryption* of attacker-supplied ciphertext, and neither
+    # path does that — both are public-key verification. Revisit when `rsa` ships a fix.
+    "RUSTSEC-2023-0071",
+]
+
+# Not ignored, and deliberately so — these are reported as warnings, which do not fail the
+# build, so they stay visible without blocking:
+#   RUSTSEC-2026-0183 / -0184  git2 unsoundness in Remote::list() and BlameHunk — this is a git
+#                              *host*; it calls neither remotes nor blame.
+#   RUSTSEC-2026-0097          rand unsoundness requiring a custom logger calling rand::rng().
+#   RUSTSEC-2024-0375 / -2021-0145  atty — a build-dependency of mediasoup-sys, never in the
+#                              shipped binary.
+#   RUSTSEC-2026-0150, -2024-0384, -2024-0436, -2025-0134
+#                              unmaintained crates reached through mediasoup / opus /
+#                              axum-server; bump the parent when it moves.
