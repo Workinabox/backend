@@ -89,8 +89,12 @@ async fn main() -> anyhow::Result<()> {
         .context("invalid backend bind address")?;
     info!("wiab backend listening on https://{addr}");
 
+    // `with_connect_info` so the peer address is always available: the rate limiter prefers
+    // `X-Forwarded-For` (set by nginx) but must be able to fall back to the socket for a client
+    // that reaches the backend directly, such as `git` over HTTPS. Without it there is no
+    // address to key on and those requests fail.
     axum_server::bind_rustls(addr, tls)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .context("backend server terminated unexpectedly")?;
 

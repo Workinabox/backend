@@ -34,6 +34,8 @@ tokio-postgres = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 whisper-rs = { workspace = true }
+governor = { workspace = true }
+tower_governor = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { workspace = true, features = ["dynamic-link", "metal"] }

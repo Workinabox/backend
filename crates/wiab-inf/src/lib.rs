@@ -57,6 +57,7 @@ pub mod postgres_team_repository;
 pub mod postgres_user_repository;
 pub mod postgres_vm_repository;
 pub mod postgres_work_repository;
+mod rate_limit;
 pub mod repository_dispatch;
 pub mod sfu;
 pub mod speech_synthesizer;
