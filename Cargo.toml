@@ -57,6 +57,11 @@ tokio = { version = "1", features = ["full"] }
 # with-serde_json-1: the outbox stores event payloads as JSONB.
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tower = { version = "0.5", features = ["util"] }
+# `axum` only: the default features also pull in tonic/gRPC, which nothing here uses.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+# Direct because `tower_governor` does not re-export it and its types appear in our signatures.
+# Must stay on the version `tower_governor` resolves to, or the types will not unify.
+governor = { version = "0.10", default-features = false, features = ["std", "quanta"] }
 http-body-util = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

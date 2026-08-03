@@ -5,8 +5,11 @@
 //! forgets its guard fails here instead of shipping — the regression test for C1/C2 in
 //! `docs/SECURITY_REVIEW_OPUS48.md`.
 
+use std::net::SocketAddr;
+
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 use wiab::config::AppConfig;
@@ -226,9 +229,15 @@ async fn send_as(
     if let Some(token) = token {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
+    let mut request = request.body(Body::empty()).expect("valid request");
+    // What `into_make_service_with_connect_info` supplies in the real server. The rate limiter
+    // needs a client address to key on, and without one it cannot answer at all.
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 50000))));
     router
         .clone()
-        .oneshot(request.body(Body::empty()).expect("valid request"))
+        .oneshot(request)
         .await
         .expect("router responds")
 }
@@ -377,6 +386,53 @@ async fn listing_meetings_requires_a_role_on_the_organization() {
     )
     .await;
     assert_eq!(member.status(), StatusCode::OK);
+}
+
+/// Online password guessing was bounded only by the network. The limiter keys on the client
+/// address, which behind nginx comes from `X-Forwarded-For` — see `frontend/nginx.conf`, which
+/// overwrites rather than appends so the value cannot be chosen by the client.
+#[tokio::test]
+async fn repeated_logins_from_one_address_are_throttled() {
+    let router = test_router().await;
+    let attempt = |ip: &'static str| {
+        let router = router.clone();
+        async move {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/auth/session")
+                .header("X-Forwarded-For", ip)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"email":"ada@example.test","password":"not-the-password"}"#,
+                ))
+                .expect("valid request");
+            router
+                .oneshot(request)
+                .await
+                .expect("router responds")
+                .status()
+        }
+    };
+
+    let mut throttled = None;
+    for _ in 0..40 {
+        let status = attempt("203.0.113.7").await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            throttled = Some(status);
+            break;
+        }
+    }
+    assert!(
+        throttled.is_some(),
+        "a burst of failed logins from one address must eventually be refused"
+    );
+
+    // A different client is unaffected — the limit is per address, not global.
+    assert_ne!(
+        attempt("198.51.100.4").await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "another address must not inherit the first one's limit"
+    );
 }
 
 #[tokio::test]

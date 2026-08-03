@@ -35,6 +35,8 @@ use wiab_core::team::TeamSnapshot;
 use wiab_core::user::{TokenScope, UserId, UserSnapshot};
 use wiab_core::work::WorkSnapshot;
 
+use tower_governor::GovernorLayer;
+
 use crate::{AppState, handle_signal_socket};
 
 /// Largest JSON/form request body accepted on the ordinary API routes.
@@ -45,6 +47,27 @@ const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 const MAX_GIT_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
+    let limits = crate::rate_limit::RateLimits::new();
+
+    // Git Smart-HTTP transport (real `git clone`/`fetch`/`push`). The `{repo_id}` segment
+    // arrives as `R-<n>.git`; the handlers strip the `.git` suffix. Grouped so the limits it
+    // needs — a much larger body, a looser rate — are stated once and apply to nothing else.
+    let git_transport: Router<AppState> = Router::new()
+        .route(
+            "/repos/{repo_id}/info/refs",
+            get(crate::git_http::info_refs),
+        )
+        .route(
+            "/repos/{repo_id}/git-upload-pack",
+            post(crate::git_http::upload_pack),
+        )
+        .route(
+            "/repos/{repo_id}/git-receive-pack",
+            post(crate::git_http::receive_pack),
+        )
+        .layer(DefaultBodyLimit::max(MAX_GIT_BODY_BYTES))
+        .layer(GovernorLayer::new(limits.git.clone()));
+
     Router::new()
         .route("/health", get(health))
         .route(
@@ -147,7 +170,10 @@ pub fn router(state: AppState) -> Router {
         .route("/users/{user_id}", get(get_user))
         .route("/users/{user_id}/ssh-keys", post(add_ssh_key))
         .route("/users/{user_id}/ssh-keys/{key_id}", delete(remove_ssh_key))
-        .route("/users/{user_id}/tokens", post(issue_token))
+        .route(
+            "/users/{user_id}/tokens",
+            post(issue_token).layer(GovernorLayer::new(limits.auth.clone())),
+        )
         .route("/users/{user_id}/tokens/{token_id}", delete(revoke_token))
         .route("/users/invite", post(invite_user))
         .route("/users/{user_id}/deactivate", post(deactivate_user))
@@ -159,32 +185,36 @@ pub fn router(state: AppState) -> Router {
         .route("/role-assignments/{assignment_id}", delete(revoke_role))
         // Interactive authentication: local password login, current-user, logout, and the
         // login-method config the SPA reads to decide which buttons to show.
-        .route("/auth/session", post(login).get(whoami).delete(logout))
+        .route(
+            "/auth/session",
+            post(login)
+                .get(whoami)
+                .delete(logout)
+                .layer(GovernorLayer::new(limits.auth.clone())),
+        )
         .route("/auth/password", put(change_password))
-        .route("/auth/password/reset/request", post(password_reset_request))
-        .route("/auth/password/reset/confirm", post(password_reset_confirm))
+        .route(
+            "/auth/password/reset/request",
+            post(password_reset_request).layer(GovernorLayer::new(limits.auth.clone())),
+        )
+        .route(
+            "/auth/password/reset/confirm",
+            post(password_reset_confirm).layer(GovernorLayer::new(limits.auth.clone())),
+        )
         .route("/auth/config", get(auth_config))
         // Inbound OIDC federation (Google / enterprise SSO): start redirects to the IdP, the
         // callback validates and establishes a session. Enabled per deployment via flags.
         .route("/auth/oidc/{connection}/start", get(oidc_start))
         .route("/auth/oidc/{connection}/callback", get(oidc_callback))
-        .route("/auth/signup", post(signup))
-        .route("/auth/invite/accept", post(accept_invite))
+        .route(
+            "/auth/signup",
+            post(signup).layer(GovernorLayer::new(limits.auth.clone())),
+        )
+        .route(
+            "/auth/invite/accept",
+            post(accept_invite).layer(GovernorLayer::new(limits.auth.clone())),
+        )
         .route("/auth/verify-email", post(verify_email))
-        // Git Smart-HTTP transport (real `git clone`/`fetch`/`push`). The `{repo_id}`
-        // segment arrives as `R-<n>.git`; the handlers strip the `.git` suffix.
-        .route(
-            "/repos/{repo_id}/info/refs",
-            get(crate::git_http::info_refs),
-        )
-        .route(
-            "/repos/{repo_id}/git-upload-pack",
-            post(crate::git_http::upload_pack).layer(DefaultBodyLimit::max(MAX_GIT_BODY_BYTES)),
-        )
-        .route(
-            "/repos/{repo_id}/git-receive-pack",
-            post(crate::git_http::receive_pack).layer(DefaultBodyLimit::max(MAX_GIT_BODY_BYTES)),
-        )
         .route(
             "/pipelines/{pipeline_id}",
             put(update_pipeline).get(get_pipeline),
@@ -200,6 +230,7 @@ pub fn router(state: AppState) -> Router {
             post(unfulfill_done),
         )
         .route("/signal", get(signal))
+        .merge(git_transport)
         // Bodies are bounded explicitly rather than left to axum's implicit default, so the
         // limit is a stated decision. The git RPC routes get their own, larger limit above:
         // a push legitimately carries packfile data, while a JSON request never does.
