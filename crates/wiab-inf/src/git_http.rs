@@ -195,7 +195,16 @@ async fn rpc(
         .into_response()
 }
 
-/// Decompresses the request body when the client sent it gzip-encoded.
+/// Largest git request body we will hold after decompression.
+///
+/// The compressed input is bounded by axum's body limit, but the *inflated* size is not:
+/// gzip's ratio is unbounded, so a couple of megabytes of zeros expands to gigabytes and the
+/// process dies. Generous for a push (a real one streams packfile data, and this bounds the
+/// negotiation body rather than the objects), small enough that a bomb hits the wall first.
+const MAX_DECOMPRESSED_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Decompresses the request body when the client sent it gzip-encoded, refusing anything that
+/// inflates past [`MAX_DECOMPRESSED_BODY_BYTES`].
 fn decode_body(headers: &HeaderMap, body: Bytes) -> Result<Vec<u8>, Response> {
     let gzipped = headers
         .get(header::CONTENT_ENCODING)
@@ -205,11 +214,22 @@ fn decode_body(headers: &HeaderMap, body: Bytes) -> Result<Vec<u8>, Response> {
     if !gzipped {
         return Ok(body.to_vec());
     }
-    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    // `take` caps what the decoder will produce, so memory is bounded during decompression
+    // rather than checked after the fact — by which point it has already been allocated. One
+    // extra byte is allowed through so a body sitting exactly on the limit is distinguishable
+    // from one exceeding it.
+    let mut decoder = flate2::read::GzDecoder::new(&body[..]).take(MAX_DECOMPRESSED_BODY_BYTES + 1);
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).map_err(|err| {
         (StatusCode::BAD_REQUEST, format!("invalid gzip body: {err}")).into_response()
     })?;
+    if out.len() as u64 > MAX_DECOMPRESSED_BODY_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("decompressed body exceeds {MAX_DECOMPRESSED_BODY_BYTES} bytes"),
+        )
+            .into_response());
+    }
     Ok(out)
 }
 
@@ -340,6 +360,42 @@ fn pkt_line(payload: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gzip(bytes: &[u8]) -> Bytes {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(bytes).expect("compress");
+        Bytes::from(encoder.finish().expect("finish"))
+    }
+
+    fn gzip_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().expect("header"));
+        headers
+    }
+
+    #[test]
+    fn a_normal_gzip_body_round_trips() {
+        let payload = b"0032want 0000000000000000000000000000000000000000\n";
+        let decoded = decode_body(&gzip_headers(), gzip(payload)).expect("valid body");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_refused() {
+        // Highly compressible input: a small request that inflates past the cap. Without the
+        // cap this is a memory-exhaustion DoS — the compressed size says nothing about the
+        // inflated one.
+        let bomb = vec![0u8; (MAX_DECOMPRESSED_BODY_BYTES + 1024) as usize];
+        let compressed = gzip(&bomb);
+        assert!(
+            compressed.len() < 1024 * 1024,
+            "the point is that the compressed form is small: {}",
+            compressed.len()
+        );
+        let response = decode_body(&gzip_headers(), compressed).expect_err("must be refused");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
     #[tokio::test]
     async fn a_failed_git_subprocess_does_not_return_its_stderr() {
