@@ -1,10 +1,20 @@
 use std::sync::Arc;
 
 use authbox_core::auth::{
-    AuthError, Clock, CredentialStore, PasswordCredential, PasswordHasher, PrincipalId,
-    SecretGenerator, Session, SessionId, SessionStore, UserDirectory,
+    AuthError, Clock, CredentialStore, MAX_PASSWORD_LENGTH, PasswordCredential, PasswordHasher,
+    PrincipalId, SecretGenerator, Session, SessionId, SessionStore, UserDirectory,
+    validate_password,
 };
 use authbox_core::credential::TokenHasher;
+
+/// How many password hashes or verifies may run at once.
+///
+/// Each costs ~19 MiB in the blocking pool, and login is unauthenticated, so without a bound
+/// the memory a stranger can make the process allocate is limited only by how fast they can
+/// open connections — a few hundred concurrent logins is gigabytes. Capping concurrency bounds
+/// peak memory to `permits x 19 MiB` no matter the request rate; excess attempts queue, which
+/// is the right failure mode for a login.
+const MAX_CONCURRENT_PASSWORD_HASHES: usize = 8;
 
 /// Idle and absolute session lifetimes, in seconds.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +72,8 @@ where
     /// that cannot succeed. Computed once at construction so the cost per attempt is exactly
     /// one verify, whether or not the account exists.
     decoy_phc: String,
+    /// Bounds concurrent Argon2 work; see [`MAX_CONCURRENT_PASSWORD_HASHES`].
+    hash_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl<S, C, D> AuthenticationService<S, C, D>
@@ -92,6 +104,7 @@ where
             clock,
             config,
             decoy_phc,
+            hash_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_HASHES)),
         }
     }
 
@@ -108,6 +121,14 @@ where
         email: &str,
         password: &str,
     ) -> Result<EstablishedSession, AuthError> {
+        // An over-long password is rejected before any hashing: it cannot match a stored
+        // credential anyway (nothing that long was ever accepted), so refusing it early costs
+        // an attacker the CPU they were trying to spend, and `InvalidCredentials` keeps the
+        // response indistinguishable from any other failed login.
+        if password.len() > MAX_PASSWORD_LENGTH {
+            return Err(AuthError::InvalidCredentials);
+        }
+
         let found = match self.directory.find_by_email(email).await? {
             Some(principal) => self
                 .credentials
@@ -221,6 +242,7 @@ where
         principal: PrincipalId,
         plaintext: &str,
     ) -> Result<(), AuthError> {
+        validate_password(plaintext)?;
         let phc_hash = self.hash(plaintext.to_owned()).await?;
         let credential = PasswordCredential::new(principal, phc_hash, self.clock.now_rfc3339());
         self.credentials.save_password(credential).await
@@ -256,6 +278,7 @@ where
 
     /// Run argon2 hashing off the async worker — it is deliberately CPU/memory-bound.
     async fn hash(&self, plaintext: String) -> Result<String, AuthError> {
+        let _permit = self.hash_permit().await?;
         let hasher = self.hasher.clone();
         tokio::task::spawn_blocking(move || hasher.hash(&plaintext))
             .await
@@ -263,8 +286,19 @@ where
     }
 
     async fn verify(&self, plaintext: String, phc_hash: String) -> Result<bool, AuthError> {
+        let _permit = self.hash_permit().await?;
         let hasher = self.hasher.clone();
         tokio::task::spawn_blocking(move || hasher.verify(&plaintext, &phc_hash))
+            .await
+            .map_err(|error| AuthError::Backend(error.to_string()))
+    }
+
+    /// Waits for a slot to do Argon2 work. Held for the duration of the hash, so at most
+    /// [`MAX_CONCURRENT_PASSWORD_HASHES`] are in flight.
+    async fn hash_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, AuthError> {
+        self.hash_permits
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|error| AuthError::Backend(error.to_string()))
     }
@@ -364,14 +398,33 @@ mod tests {
         /// is counted rather than timed — a wall-clock assertion would be flaky and would not
         /// actually pin the behaviour.
         verifies: AtomicU64,
+        in_flight: AtomicU64,
+        peak_concurrent: AtomicU64,
+    }
+    impl FakeHasher {
+        /// Holds a slot for long enough that overlapping work is observable.
+        fn enter(&self) {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_concurrent.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        fn leave(&self) {
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     impl PasswordHasher for FakeHasher {
         fn hash(&self, plaintext: &str) -> String {
-            format!("phc({plaintext})")
+            self.enter();
+            let out = format!("phc({plaintext})");
+            self.leave();
+            out
         }
         fn verify(&self, plaintext: &str, phc_hash: &str) -> bool {
             self.verifies.fetch_add(1, Ordering::SeqCst);
-            phc_hash == format!("phc({plaintext})")
+            self.enter();
+            let out = phc_hash == format!("phc({plaintext})");
+            self.leave();
+            out
         }
     }
 
@@ -427,6 +480,41 @@ mod tests {
                 absolute_seconds: 86_400,
             },
         )
+    }
+
+    /// Peak Argon2 memory has to be bounded by the semaphore, not by how fast a stranger can
+    /// open connections — login is unauthenticated and each verify costs ~19 MiB.
+    #[tokio::test]
+    async fn concurrent_password_work_is_capped() {
+        let hasher = Arc::new(FakeHasher::default());
+        let service = Arc::new(service_with(hasher.clone()));
+        service
+            .set_password(PrincipalId::new("U-1"), "correct horse")
+            .await
+            .unwrap();
+
+        let attempts = MAX_CONCURRENT_PASSWORD_HASHES * 4;
+        let mut handles = Vec::new();
+        for _ in 0..attempts {
+            let service = service.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = service
+                    .login_with_password("ada@example.com", "guess")
+                    .await;
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("task completes");
+        }
+
+        // An upper bound, not an equality: how many actually overlap depends on the runner,
+        // and asserting the exact peak would be flaky without testing anything more. The bound
+        // is the property that matters — it is what caps peak memory.
+        let peak = hasher.peak_concurrent.load(Ordering::SeqCst) as usize;
+        assert!(
+            peak <= MAX_CONCURRENT_PASSWORD_HASHES,
+            "{peak} hashes ran at once, above the cap of {MAX_CONCURRENT_PASSWORD_HASHES}"
+        );
     }
 
     /// The oracle this closes: an unknown address used to return before any Argon2 work, so

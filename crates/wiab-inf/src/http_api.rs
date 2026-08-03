@@ -2,7 +2,7 @@ use authbox_core::auth::{AuthError, PrincipalId};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, Request, State, ws::WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, ws::WebSocketUpgrade},
     http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{AppendHeaders, IntoResponse, Response},
@@ -36,6 +36,13 @@ use wiab_core::user::{TokenScope, UserId, UserSnapshot};
 use wiab_core::work::WorkSnapshot;
 
 use crate::{AppState, handle_signal_socket};
+
+/// Largest JSON/form request body accepted on the ordinary API routes.
+const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
+
+/// Largest body accepted on the git Smart-HTTP RPC routes, which legitimately carry packfile
+/// data. Still bounded: `decode_body` separately caps what a compressed body may inflate to.
+const MAX_GIT_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -172,11 +179,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/repos/{repo_id}/git-upload-pack",
-            post(crate::git_http::upload_pack),
+            post(crate::git_http::upload_pack).layer(DefaultBodyLimit::max(MAX_GIT_BODY_BYTES)),
         )
         .route(
             "/repos/{repo_id}/git-receive-pack",
-            post(crate::git_http::receive_pack),
+            post(crate::git_http::receive_pack).layer(DefaultBodyLimit::max(MAX_GIT_BODY_BYTES)),
         )
         .route(
             "/pipelines/{pipeline_id}",
@@ -193,6 +200,10 @@ pub fn router(state: AppState) -> Router {
             post(unfulfill_done),
         )
         .route("/signal", get(signal))
+        // Bodies are bounded explicitly rather than left to axum's implicit default, so the
+        // limit is a stated decision. The git RPC routes get their own, larger limit above:
+        // a push legitimately carries packfile data, while a JSON request never does.
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), csrf_guard))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1704,12 +1715,7 @@ async fn change_password(
     Json(request): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let (user_id, _scope) = authenticate(&state, &headers).await?;
-    if request.new_password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters".to_owned(),
-        ));
-    }
+    password_policy(&request.new_password)?;
     state
         .auth_service
         .change_password(
@@ -1757,12 +1763,7 @@ async fn password_reset_confirm(
     State(state): State<AppState>,
     Json(request): Json<PasswordResetConfirmBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if request.new_password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters".to_owned(),
-        ));
-    }
+    password_policy(&request.new_password)?;
     state
         .password_reset_service
         .confirm(&request.token, &request.new_password)
@@ -1968,12 +1969,7 @@ async fn signup(
             "self-service signup is disabled".to_owned(),
         ));
     }
-    if request.password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters".to_owned(),
-        ));
-    }
+    password_policy(&request.password)?;
     // A taken email is not reported — same 202 either way. The taken branch still spends the
     // password-hashing cost, because a 202 that returns noticeably faster answers the question
     // the identical status code was there to refuse.
@@ -2017,12 +2013,7 @@ async fn accept_invite(
     State(state): State<AppState>,
     Json(request): Json<AcceptInviteRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if request.password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters".to_owned(),
-        ));
-    }
+    password_policy(&request.password)?;
     let principal = state
         .invitation_service
         .accept_invite(&request.token, &request.password)
@@ -2460,6 +2451,16 @@ async fn unfulfill_done(
 fn bad_request(err: anyhow::Error) -> (StatusCode, String) {
     tracing::debug!(error = %err, "rejected request");
     (StatusCode::BAD_REQUEST, err.to_string())
+}
+
+/// Rejects a password the shared policy refuses, before it reaches Argon2.
+///
+/// The rule itself lives in `authbox_core` and the application services enforce it too — this
+/// is the early, well-worded 400, not the authority. Four handlers each carried their own
+/// `len() < 8` before, which is how the services ended up accepting anything at all.
+fn password_policy(plaintext: &str) -> Result<(), (StatusCode, String)> {
+    authbox_core::auth::validate_password(plaintext)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))
 }
 
 fn not_found(what: &str, id: &str) -> (StatusCode, String) {

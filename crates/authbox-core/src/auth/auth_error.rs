@@ -14,6 +14,8 @@ pub enum AuthError {
     FederationFailed(String),
     #[error("'{0}' is not a valid session id")]
     InvalidSessionId(String),
+    #[error("password must be between {min} and {max} characters")]
+    PasswordPolicy { min: usize, max: usize },
     #[error("auth backend error: {0}")]
     Backend(String),
 }
