@@ -11,6 +11,10 @@ use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 use wiab::config::AppConfig;
 use wiab::{Cli, bootstrap};
+use wiab_app::{CreateRepoRequest, CreateUserRequest, IssueTokenRequest};
+use wiab_core::access::{Role, Scope};
+use wiab_core::organization::OrganizationId;
+use wiab_inf::AppState;
 
 /// Every route the authentication middleware must gate, with a path shaped like the real
 /// thing. The ids need not exist: the gate rejects before any handler resolves them.
@@ -100,8 +104,10 @@ const GUARDED_ROUTES: &[(Method, &str)] = &[
     (Method::GET, "/signal"),
 ];
 
-/// Builds the same router the binary serves, over in-memory persistence.
-async fn test_router() -> Router {
+/// Builds the same `AppState` the binary serves, over in-memory persistence. Bootstrap has
+/// already seeded organization `O-1` with project `P-1` and an Owner user by the time this
+/// returns.
+async fn test_state() -> AppState {
     let cli = Cli {
         persistence: "memory".to_owned(),
         database_url: String::new(),
@@ -112,21 +118,117 @@ async fn test_router() -> Router {
         .expect("temp git root")
         .keep()
         .join("git");
-    let state = bootstrap::build_app_state(&config, None)
+    bootstrap::build_app_state(&config, None)
         .await
-        .expect("app state");
-    wiab_inf::http_router(state)
+        .expect("app state")
+}
+
+async fn test_router() -> Router {
+    wiab_inf::http_router(test_state().await)
+}
+
+/// A repo of each visibility, plus a member of `O-1` and a stranger — the two callers the
+/// visibility rule has to tell apart.
+struct RepoFixture {
+    router: Router,
+    private_repo: String,
+    public_repo: String,
+    member_token: String,
+    stranger_token: String,
+}
+
+async fn repo_fixture() -> RepoFixture {
+    let state = test_state().await;
+
+    let repo = |name: &'static str, visibility: &'static str| {
+        let repos = state.repo_service.clone();
+        async move {
+            repos
+                .create_repo(
+                    "P-1",
+                    CreateRepoRequest {
+                        name: name.to_owned(),
+                        description: String::new(),
+                        visibility: Some(visibility.to_owned()),
+                    },
+                )
+                .await
+                .expect("create repo")
+                .expect("seed project exists")
+                .id
+        }
+    };
+    let private_repo = repo("secrets", "private").await;
+    let public_repo = repo("open", "public").await;
+
+    let user = |name: &'static str, role: Option<Role>| {
+        let users = state.user_service.clone();
+        let access = state.access_service.clone();
+        async move {
+            let user = users
+                .create_user(CreateUserRequest {
+                    kind: "human".to_owned(),
+                    name: name.to_owned(),
+                    email: Some(format!("{name}@example.test")),
+                })
+                .await
+                .expect("create user");
+            if let Some(role) = role {
+                access
+                    .grant_direct(
+                        user.id.parse().expect("user id"),
+                        Scope::Org(OrganizationId::from_number(1)),
+                        role,
+                    )
+                    .await
+                    .expect("grant role");
+            }
+            users
+                .issue_token(
+                    &user.id,
+                    IssueTokenRequest {
+                        label: "test".to_owned(),
+                        read_only: false,
+                        repos: None,
+                        orgs: None,
+                        expires_at: None,
+                    },
+                )
+                .await
+                .expect("issue token")
+                .expect("user exists")
+                .plaintext
+        }
+    };
+    let member_token = user("member", Some(Role::Read)).await;
+    let stranger_token = user("stranger", None).await;
+
+    RepoFixture {
+        router: wiab_inf::http_router(state),
+        private_repo,
+        public_repo,
+        member_token,
+        stranger_token,
+    }
 }
 
 async fn send(router: &Router, method: Method, path: &str) -> axum::http::Response<Body> {
-    let request = Request::builder()
-        .method(method)
-        .uri(path)
-        .body(Body::empty())
-        .expect("valid request");
+    send_as(router, method, path, None).await
+}
+
+async fn send_as(
+    router: &Router,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+) -> axum::http::Response<Body> {
+    let mut request = Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
     router
         .clone()
-        .oneshot(request)
+        .oneshot(request.body(Body::empty()).expect("valid request"))
         .await
         .expect("router responds")
 }
@@ -167,6 +269,89 @@ async fn health_is_public() {
     let router = test_router().await;
     let response = send(&router, Method::GET, "/health").await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// The browse endpoints offer the same contents `git clone` does, so they must apply the same
+/// visibility rule. Before this, any authenticated caller could read any private repo in any
+/// organization (C2).
+#[tokio::test]
+async fn private_repo_contents_are_closed_to_non_members() {
+    let fixture = repo_fixture().await;
+    let paths = [
+        format!("/repos/{}", fixture.private_repo),
+        format!("/repos/{}/branches", fixture.private_repo),
+        format!("/repos/{}/branches/main/files", fixture.private_repo),
+        format!(
+            "/repos/{}/branches/main/files/raw?path=.env",
+            fixture.private_repo
+        ),
+        format!("/repos/{}/branches/main/commits", fixture.private_repo),
+    ];
+    for path in &paths {
+        let response = send_as(
+            &fixture.router,
+            Method::GET,
+            path,
+            Some(&fixture.stranger_token),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "GET {path} must be closed to a caller with no role"
+        );
+    }
+}
+
+#[tokio::test]
+async fn private_repo_contents_are_open_to_members() {
+    let fixture = repo_fixture().await;
+    let response = send_as(
+        &fixture.router,
+        Method::GET,
+        &format!("/repos/{}", fixture.private_repo),
+        Some(&fixture.member_token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// A public repo stays anonymously cloneable over git, so an authenticated caller with no role
+/// must still be able to browse it — the REST door must not be *stricter* than the git one
+/// either.
+#[tokio::test]
+async fn public_repo_metadata_is_readable_without_a_role() {
+    let fixture = repo_fixture().await;
+    let response = send_as(
+        &fixture.router,
+        Method::GET,
+        &format!("/repos/{}", fixture.public_repo),
+        Some(&fixture.stranger_token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn listing_a_projects_repos_requires_a_role_on_its_organization() {
+    let fixture = repo_fixture().await;
+    let stranger = send_as(
+        &fixture.router,
+        Method::GET,
+        "/projects/P-1/repos",
+        Some(&fixture.stranger_token),
+    )
+    .await;
+    assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+
+    let member = send_as(
+        &fixture.router,
+        Method::GET,
+        "/projects/P-1/repos",
+        Some(&fixture.member_token),
+    )
+    .await;
+    assert_eq!(member.status(), StatusCode::OK);
 }
 
 #[tokio::test]

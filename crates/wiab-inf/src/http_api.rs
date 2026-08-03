@@ -27,7 +27,9 @@ use wiab_core::organization::OrganizationSnapshot;
 use wiab_core::pipeline::PipelineSnapshot;
 use wiab_core::project::ProjectSnapshot;
 use wiab_core::pull_request::PullRequestSnapshot;
-use wiab_core::repo::{BranchSnapshot, CommitSnapshot, FileEntrySnapshot, RepoId, RepoSnapshot};
+use wiab_core::repo::{
+    BranchSnapshot, CommitSnapshot, FileEntrySnapshot, RepoId, RepoSnapshot, Visibility,
+};
 use wiab_core::task::TaskSnapshot;
 use wiab_core::team::TeamSnapshot;
 use wiab_core::user::{TokenScope, UserId, UserSnapshot};
@@ -855,7 +857,9 @@ async fn update_board(
 async fn list_repos(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<RepoSnapshot>>, (StatusCode, String)> {
+    require_project_org_role(&state, &project_id, Operation::Read, &headers).await?;
     match state
         .repo_service
         .list_repos(&project_id)
@@ -896,7 +900,9 @@ async fn create_repo(
 async fn get_repo(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<RepoSnapshot>, (StatusCode, String)> {
+    require_repo_read_access(&state, &repo_id, &headers).await?;
     match state
         .repo_service
         .repo_snapshot(&repo_id)
@@ -944,7 +950,9 @@ struct CommitsQuery {
 async fn list_branches(
     State(state): State<AppState>,
     Path(repo_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<BranchSnapshot>>, (StatusCode, String)> {
+    require_repo_read_access(&state, &repo_id, &headers).await?;
     let service = state.repo_service.clone();
     let id = repo_id.clone();
     match service.list_branches(&id).await.map_err(bad_request)? {
@@ -957,7 +965,9 @@ async fn list_repo_files(
     State(state): State<AppState>,
     Path((repo_id, branch)): Path<(String, String)>,
     Query(query): Query<FilesQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<FileEntrySnapshot>>, (StatusCode, String)> {
+    require_repo_read_access(&state, &repo_id, &headers).await?;
     let service = state.repo_service.clone();
     let dir = query.path.unwrap_or_default();
     let (id, branch_param) = (repo_id.clone(), branch);
@@ -975,7 +985,9 @@ async fn read_repo_file(
     State(state): State<AppState>,
     Path((repo_id, branch)): Path<(String, String)>,
     Query(query): Query<RawFileQuery>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_repo_read_access(&state, &repo_id, &headers).await?;
     let service = state.repo_service.clone();
     let (id, branch_param, path) = (repo_id.clone(), branch, query.path);
     match service
@@ -995,7 +1007,9 @@ async fn list_repo_commits(
     State(state): State<AppState>,
     Path((repo_id, branch)): Path<(String, String)>,
     Query(query): Query<CommitsQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<CommitSnapshot>>, (StatusCode, String)> {
+    require_repo_read_access(&state, &repo_id, &headers).await?;
     let service = state.repo_service.clone();
     let limit = query.limit.unwrap_or(20).clamp(1, 1000);
     let (id, branch_param) = (repo_id.clone(), branch);
@@ -1353,6 +1367,27 @@ async fn require_repo_role(
         .await
         .map_err(internal)?;
     if allowed { Ok(()) } else { Err(forbidden()) }
+}
+
+/// Requires the caller may read the repo's contents, applying the same rule the git transport
+/// enforces (`git_http::authorize_git`): a `Public` repo is readable by any authenticated
+/// caller, a `Private` one needs a Read role. Used by the REST browse handlers, which offer
+/// the same data as `git clone` and so must not be a weaker door onto it.
+async fn require_repo_read_access(
+    state: &AppState,
+    repo_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    if state
+        .repo_service
+        .repo_visibility(repo_id)
+        .await
+        .map_err(bad_request)?
+        == Some(Visibility::Public)
+    {
+        return Ok(());
+    }
+    require_repo_role(state, repo_id, Operation::Read, headers).await
 }
 
 /// Requires the caller hold `operation` on the repo that owns a pull request. 404 if the
