@@ -25,6 +25,7 @@ use wiab_app::{MeetingApplicationService, MeetingClientEvent};
 use wiab_core::{
     meeting::{MeetingSnapshot, MinutesDocument},
     transcript::{FinalizedTranscript, TranscriptIdentity},
+    user::UserId,
 };
 
 use crate::{
@@ -58,9 +59,10 @@ struct ServerEnvelope {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientSignal {
+    // No `participant_id`: the seat is resolved from the socket's authenticated user, so a
+    // client cannot name one. See `MeetingApplicationService::validate_join`.
     JoinMeeting {
         meeting_id: String,
-        participant_id: String,
     },
     EndMeeting {
         meeting_id: String,
@@ -993,7 +995,9 @@ fn server_signal_from_client_event(event: MeetingClientEvent) -> ServerSignal {
     }
 }
 
-pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
+/// `user` is the identity the upgrade request authenticated as; every seat this socket takes
+/// is resolved from it.
+pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<ServerEnvelope>();
 
@@ -1040,10 +1044,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                 };
 
                 match envelope.signal {
-                    ClientSignal::JoinMeeting {
-                        meeting_id,
-                        participant_id,
-                    } => {
+                    ClientSignal::JoinMeeting { meeting_id } => {
                         if current_peer.is_some() {
                             send_error(
                                 "peer is already joined to a meeting".to_owned(),
@@ -1052,12 +1053,12 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, socket: WebSocket) {
                             continue;
                         }
 
-                        let meeting = match sfu
+                        let (meeting, participant_id) = match sfu
                             .meeting_service
-                            .validate_join(&meeting_id, &participant_id)
+                            .validate_join(&meeting_id, user)
                             .await
                         {
-                            Ok(meeting) => meeting,
+                            Ok(resolved) => resolved,
                             Err(err) => {
                                 send_error(format!("failed to join meeting: {err}"), &outbound_tx);
                                 continue;

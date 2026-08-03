@@ -93,19 +93,25 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
             .map(|(meeting, _)| meeting.snapshot()))
     }
 
+    /// Resolves the seat `user` may occupy in an active meeting, returning it with the snapshot.
+    /// The caller does not name a participant — their identity selects it — so there is nothing
+    /// to assert and nothing to forge.
     pub async fn validate_join(
         &self,
         meeting_id: &str,
-        participant_id: &str,
-    ) -> anyhow::Result<MeetingSnapshot> {
+        user: UserId,
+    ) -> anyhow::Result<(MeetingSnapshot, String)> {
         let (meeting, _) = self
             .meeting_repository
             .get(meeting_id)
             .await?
             .ok_or_else(|| anyhow!("meeting '{}' not found", meeting_id))?;
         meeting.require_active()?;
-        meeting.require_participant(participant_id)?;
-        Ok(meeting.snapshot())
+        let participant_id = meeting
+            .require_participant_for_user(user)?
+            .participant_id
+            .clone();
+        Ok((meeting.snapshot(), participant_id))
     }
 
     pub async fn record_human_utterance(
@@ -621,6 +627,78 @@ mod tests {
                 "speech backend unavailable".to_owned(),
             ))
         }
+    }
+
+    /// Joining is resolution, not assertion: the caller's identity picks the seat. Before this,
+    /// any caller could claim any `participant_id` from the meetings listing (H2).
+    #[tokio::test]
+    async fn joining_resolves_the_seat_from_the_caller() {
+        let service = MeetingApplicationService::new(
+            TestMeetingRepository::default(),
+            Some(Arc::new(TestIntelligence)),
+            Arc::new(TestSpeechSynthesizer),
+            Arc::new(TestClock),
+        );
+        let meeting = service
+            .create_meeting(
+                "O-1",
+                owner_user(),
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner_name: "Frederic".to_owned(),
+                    invited_participants: vec![CreateMeetingParticipant::Human {
+                        name: "Alice".to_owned(),
+                        user_id: "U-9".to_owned(),
+                    }],
+                    agenda: vec!["review".to_owned()],
+                },
+            )
+            .await
+            .expect("meeting should be created");
+
+        let (_, owner_seat) = service
+            .validate_join(&meeting.meeting_id, owner_user())
+            .await
+            .expect("the owner may join");
+        assert_eq!(owner_seat, meeting.owner_participant_id);
+
+        let (_, alice_seat) = service
+            .validate_join(&meeting.meeting_id, UserId::from_number(9))
+            .await
+            .expect("an invited human may join");
+        assert_ne!(alice_seat, owner_seat);
+    }
+
+    #[tokio::test]
+    async fn a_user_with_no_seat_cannot_join() {
+        let service = MeetingApplicationService::new(
+            TestMeetingRepository::default(),
+            Some(Arc::new(TestIntelligence)),
+            Arc::new(TestSpeechSynthesizer),
+            Arc::new(TestClock),
+        );
+        let meeting = service
+            .create_meeting(
+                "O-1",
+                owner_user(),
+                CreateMeetingRequest {
+                    title: "Test".to_owned(),
+                    owner_name: "Frederic".to_owned(),
+                    invited_participants: vec![],
+                    agenda: vec!["review".to_owned()],
+                },
+            )
+            .await
+            .expect("meeting should be created");
+
+        let error = service
+            .validate_join(&meeting.meeting_id, UserId::from_number(404))
+            .await
+            .expect_err("a stranger must not join");
+        assert!(
+            error.to_string().contains("not a participant"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
