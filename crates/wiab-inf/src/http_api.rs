@@ -1778,9 +1778,18 @@ async fn auth_config(State(state): State<AppState>) -> Json<AuthConfigResponse> 
 
 /// Only same-origin relative paths are accepted as a post-login destination (no open
 /// redirect); anything else falls back to the frontend home.
+///
+/// Backslashes are rejected outright rather than reasoned about: browsers normalize `\` to `/`
+/// when resolving a `Location`, so `/\evil.com` — which passes a naive "starts with a single
+/// slash" check — is fetched as the protocol-relative `//evil.com`. Refusing the character is
+/// simpler than trying to predict each browser's normalization.
 fn sanitize_return_to(next: Option<&str>) -> String {
     match next {
-        Some(value) if value.starts_with('/') && !value.starts_with("//") => value.to_owned(),
+        Some(value)
+            if value.starts_with('/') && !value.starts_with("//") && !value.contains('\\') =>
+        {
+            value.to_owned()
+        }
         _ => "/works".to_owned(),
     }
 }
@@ -1843,6 +1852,10 @@ async fn oidc_callback(
         .complete_login(&connection, &state_param, &code)
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    // Sanitize again on the way out. The value was checked when the flow started and has since
+    // round-tripped through the flow store; this is the hop that actually emits a `Location`,
+    // so it is the one that must be safe.
+    let return_to = sanitize_return_to(Some(&return_to));
     let established = state
         .auth_service
         .establish_session(principal)
@@ -2438,6 +2451,32 @@ async fn signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_same_origin_paths_survive_return_to_sanitizing() {
+        // `/\evil.com` is the one that matters: it passes a "starts with a single slash"
+        // check, but a browser normalizes the backslash and fetches `//evil.com`.
+        for hostile in [
+            "//evil.com",
+            "/\\evil.com",
+            "/\\/evil.com",
+            "https://evil.com",
+            "\\\\evil.com",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                sanitize_return_to(Some(hostile)),
+                "/works",
+                "{hostile} must not survive"
+            );
+        }
+        assert_eq!(sanitize_return_to(Some("/dashboard")), "/dashboard");
+        assert_eq!(
+            sanitize_return_to(Some("/repos/R-1?tab=files")),
+            "/repos/R-1?tab=files"
+        );
+        assert_eq!(sanitize_return_to(None), "/works");
+    }
 
     #[test]
     fn csrf_exemptions_cover_only_identity_establishing_posts() {
