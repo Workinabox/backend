@@ -8,3 +8,4 @@ authbox-core = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+subtle = { workspace = true }

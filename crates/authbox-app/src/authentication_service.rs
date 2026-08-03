@@ -6,6 +6,7 @@ use authbox_core::auth::{
     validate_password,
 };
 use authbox_core::credential::TokenHasher;
+use subtle::ConstantTimeEq;
 
 /// How many password hashes or verifies may run at once.
 ///
@@ -221,8 +222,24 @@ where
 
     /// Double-submit CSRF check: true when the presented token hashes to the session's stored
     /// CSRF hash. Empty tokens never match.
+    ///
+    /// Constant-time comparison. What is compared here is a pair of SHA-256 digests, not the
+    /// secret, so a prefix-timing oracle would not give an attacker a way to construct a
+    /// matching token — this is consistency with the rest of the crypto discipline rather than
+    /// a live vector, and it costs nothing.
     pub fn csrf_matches(&self, session: &ResolvedSession, presented: &str) -> bool {
-        !presented.is_empty() && self.token_hasher.hash(presented) == session.csrf_hash
+        if presented.is_empty() {
+            return false;
+        }
+        let presented_hash = self.token_hasher.hash(presented);
+        // `ct_eq` is only constant-time for equal-length inputs; both sides are hex digests of
+        // the same hash, so a length mismatch means a malformed stored value, not a secret.
+        presented_hash.len() == session.csrf_hash.len()
+            && bool::from(
+                presented_hash
+                    .as_bytes()
+                    .ct_eq(session.csrf_hash.as_bytes()),
+            )
     }
 
     /// Revoke the session a cookie secret resolves to. Idempotent.
