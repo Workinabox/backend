@@ -58,6 +58,10 @@ where
     token_hasher: Arc<dyn TokenHasher>,
     clock: Arc<dyn Clock>,
     config: SessionConfig,
+    /// A real PHC hash of a value nobody knows, used to spend the same Argon2 work on a login
+    /// that cannot succeed. Computed once at construction so the cost per attempt is exactly
+    /// one verify, whether or not the account exists.
+    decoy_phc: String,
 }
 
 impl<S, C, D> AuthenticationService<S, C, D>
@@ -77,6 +81,7 @@ where
         clock: Arc<dyn Clock>,
         config: SessionConfig,
     ) -> Self {
+        let decoy_phc = hasher.hash(&secrets.generate());
         Self {
             sessions,
             credentials,
@@ -86,34 +91,57 @@ where
             token_hasher,
             clock,
             config,
+            decoy_phc,
         }
     }
 
     /// Verify an email/password pair and, on success, establish a session.
     ///
     /// Returns `InvalidCredentials` for an unknown email, a user with no password, or a bad
-    /// password — the same error in every case so the response does not distinguish them.
-    /// (A login-timing oracle still exists for now: verification only runs when a credential
-    /// is present. Flattening it with a dummy hash is a follow-up once the argon2 impl can
-    /// supply a constant PHC.)
+    /// password — the same error in every case, and after the same work. Returning early on a
+    /// missing credential would skip the Argon2 verify, and that difference is measurable: it
+    /// tells an attacker which addresses are registered even though every response looks
+    /// identical. So the miss paths verify the presented password against a decoy hash and
+    /// discard the answer.
     pub async fn login_with_password(
         &self,
         email: &str,
         password: &str,
     ) -> Result<EstablishedSession, AuthError> {
-        let Some(principal) = self.directory.find_by_email(email).await? else {
-            return Err(AuthError::InvalidCredentials);
+        let found = match self.directory.find_by_email(email).await? {
+            Some(principal) => self
+                .credentials
+                .find_password(&principal)
+                .await?
+                .map(|credential| (principal, credential.phc_hash().to_owned())),
+            None => None,
         };
-        let Some(credential) = self.credentials.find_password(&principal).await? else {
-            return Err(AuthError::InvalidCredentials);
+
+        let (principal, phc_hash) = match found {
+            Some(found) => found,
+            None => {
+                self.verify(password.to_owned(), self.decoy_phc.clone())
+                    .await?;
+                return Err(AuthError::InvalidCredentials);
+            }
         };
-        let ok = self
-            .verify(password.to_owned(), credential.phc_hash().to_owned())
-            .await?;
+
+        let ok = self.verify(password.to_owned(), phc_hash).await?;
         if !ok {
             return Err(AuthError::InvalidCredentials);
         }
         self.establish_session(principal).await
+    }
+
+    /// Spend the Argon2 cost a real password write would, and discard the result.
+    ///
+    /// For flows that must not reveal by their duration whether they did any work — signup
+    /// returns the same 202 for a fresh and a taken address, which is undone if only one of
+    /// them hashes. This matches the dominant cost, not every last microsecond: the branches
+    /// still differ by a database write and an email send, both far below Argon2's ~19 MiB.
+    pub async fn spend_password_cost(&self, plaintext: &str) -> Result<(), AuthError> {
+        self.hash(plaintext.to_owned()).await?;
+        Ok(())
     }
 
     /// Mint a fresh session for an already-authenticated principal (also the entry point the
@@ -330,12 +358,19 @@ mod tests {
     }
 
     /// Reversible "hash" so the fake can verify deterministically.
-    struct FakeHasher;
+    #[derive(Default)]
+    struct FakeHasher {
+        /// How many verifies were performed. The timing oracle is a *work* difference, so it
+        /// is counted rather than timed — a wall-clock assertion would be flaky and would not
+        /// actually pin the behaviour.
+        verifies: AtomicU64,
+    }
     impl PasswordHasher for FakeHasher {
         fn hash(&self, plaintext: &str) -> String {
             format!("phc({plaintext})")
         }
         fn verify(&self, plaintext: &str, phc_hash: &str) -> bool {
+            self.verifies.fetch_add(1, Ordering::SeqCst);
             phc_hash == format!("phc({plaintext})")
         }
     }
@@ -369,6 +404,12 @@ mod tests {
     }
 
     fn service() -> AuthenticationService<FakeSessions, FakeCredentials, FakeDirectory> {
+        service_with(Arc::new(FakeHasher::default()))
+    }
+
+    fn service_with(
+        hasher: Arc<FakeHasher>,
+    ) -> AuthenticationService<FakeSessions, FakeCredentials, FakeDirectory> {
         let mut directory = FakeDirectory::default();
         directory
             .by_email
@@ -377,7 +418,7 @@ mod tests {
             FakeSessions::default(),
             FakeCredentials::default(),
             directory,
-            Arc::new(FakeHasher),
+            hasher,
             Arc::new(FakeSecrets::default()),
             Arc::new(FakeTokenHasher),
             Arc::new(FakeClock),
@@ -386,6 +427,56 @@ mod tests {
                 absolute_seconds: 86_400,
             },
         )
+    }
+
+    /// The oracle this closes: an unknown address used to return before any Argon2 work, so
+    /// "does this account exist" was answerable from response time alone even though every
+    /// response body and status is identical.
+    #[tokio::test]
+    async fn a_failed_login_costs_the_same_whether_or_not_the_account_exists() {
+        let unknown_email = {
+            let hasher = Arc::new(FakeHasher::default());
+            let service = service_with(hasher.clone());
+            hasher.verifies.store(0, Ordering::SeqCst);
+            let _ = service
+                .login_with_password("nobody@example.com", "guess")
+                .await;
+            hasher.verifies.load(Ordering::SeqCst)
+        };
+
+        let known_email_wrong_password = {
+            let hasher = Arc::new(FakeHasher::default());
+            let service = service_with(hasher.clone());
+            service
+                .set_password(PrincipalId::new("U-1"), "correct horse")
+                .await
+                .unwrap();
+            hasher.verifies.store(0, Ordering::SeqCst);
+            let _ = service
+                .login_with_password("ada@example.com", "guess")
+                .await;
+            hasher.verifies.load(Ordering::SeqCst)
+        };
+
+        let known_email_no_password = {
+            let hasher = Arc::new(FakeHasher::default());
+            let service = service_with(hasher.clone());
+            hasher.verifies.store(0, Ordering::SeqCst);
+            let _ = service
+                .login_with_password("ada@example.com", "guess")
+                .await;
+            hasher.verifies.load(Ordering::SeqCst)
+        };
+
+        assert_eq!(known_email_wrong_password, 1, "the baseline is one verify");
+        assert_eq!(
+            unknown_email, known_email_wrong_password,
+            "an unknown address must cost the same as a wrong password"
+        );
+        assert_eq!(
+            known_email_no_password, known_email_wrong_password,
+            "an account with no password must cost the same as a wrong password"
+        );
     }
 
     #[tokio::test]
