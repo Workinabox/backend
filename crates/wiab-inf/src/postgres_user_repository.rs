@@ -22,6 +22,23 @@ impl PostgresUserRepository {
     pub fn new(pool: Pool) -> Self {
         Self { pool }
     }
+    /// Resolves a credential to its owner with one indexed query against the credential table.
+    ///
+    /// Deliberately not `get()`: neither caller needs the aggregate here — `resolve_token`
+    /// re-loads it inside its compare-and-swap loop anyway — so this avoids the `app_user` join
+    /// and the per-user follow-up queries `list()` would run.
+    ///
+    /// `ORDER BY user_id LIMIT 1` because neither index is unique: two users can hold the same
+    /// SSH key today, and without an order the winner would depend on physical scan order.
+    async fn find_owner(&self, query: &str, value: &str) -> Result<Option<UserId>, RepoError> {
+        let client = self.pool.get().await.map_err(repo_error)?;
+        let row = client
+            .query_opt(&format!("{query} ORDER BY user_id LIMIT 1"), &[&value])
+            .await
+            .map_err(repo_error)?;
+        row.map(|row| row.get::<_, String>(0).parse().map_err(repo_error))
+            .transpose()
+    }
 }
 
 fn repo_error<E: std::fmt::Display>(error: E) -> RepoError {
@@ -195,6 +212,25 @@ impl UserRepository for PostgresUserRepository {
 
         tx.commit().await.map_err(save_error)?;
         Ok(next)
+    }
+
+    async fn find_id_by_token_hash(&self, hash: &str) -> Result<Option<UserId>, RepoError> {
+        self.find_owner(
+            "SELECT user_id FROM user_access_token WHERE hash = $1",
+            hash,
+        )
+        .await
+    }
+
+    async fn find_id_by_ssh_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<UserId>, RepoError> {
+        self.find_owner(
+            "SELECT user_id FROM user_ssh_key WHERE fingerprint = $1",
+            fingerprint,
+        )
+        .await
     }
 
     async fn get(&self, id: &UserId) -> Result<Option<(User, Version)>, RepoError> {
