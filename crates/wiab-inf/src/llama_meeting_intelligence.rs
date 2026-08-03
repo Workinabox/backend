@@ -435,6 +435,7 @@ mod tests {
             participants: vec![
                 MeetingParticipant {
                     participant_id: "owner".to_owned(),
+                    user_id: Some(wiab_core::user::UserId::from_number(1)),
                     kind: ParticipantKind::Human,
                     meeting_role: MeetingRole::Owner,
                     name: "Frederic".to_owned(),
@@ -443,6 +444,7 @@ mod tests {
                 },
                 MeetingParticipant {
                     participant_id: "moderator".to_owned(),
+                    user_id: None,
                     kind: ParticipantKind::Agent,
                     meeting_role: MeetingRole::Moderator,
                     name: "Moderator".to_owned(),

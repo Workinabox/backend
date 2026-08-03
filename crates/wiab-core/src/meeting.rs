@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::meeting_traits::FloorRequestCandidate;
 use crate::organization::OrganizationId;
 use crate::repository::{RepoError, SaveError, Version};
+use crate::user::UserId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +49,14 @@ pub enum MeetingError {
     ModeratorNotAgent(String),
     #[error("participant ids must be unique")]
     DuplicateParticipantIds,
+    #[error("human participant '{0}' must be bound to a user")]
+    HumanParticipantWithoutUser(String),
+    #[error("agent participant '{0}' must not be bound to a user")]
+    AgentParticipantWithUser(String),
+    #[error("user '{0}' holds more than one seat in the meeting")]
+    DuplicateParticipantUser(String),
+    #[error("user '{0}' is not a participant of this meeting")]
+    UserNotParticipant(String),
     #[error("duplicate agent name '{0}'")]
     DuplicateAgentName(String),
     #[error("participant '{0}' does not belong to meeting")]
@@ -67,6 +76,11 @@ pub enum MeetingError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeetingParticipant {
     pub participant_id: String,
+    /// The platform user a human participant speaks as — `Some` for `Human`, `None` for
+    /// `Agent`. This is what makes a seat in a meeting something you have to *be* rather than
+    /// something you can name: joining resolves the caller's participant through this field, so
+    /// a `participant_id` is a correlation key, never a credential.
+    pub user_id: Option<UserId>,
     pub kind: ParticipantKind,
     pub meeting_role: MeetingRole,
     pub name: String,
@@ -243,6 +257,7 @@ impl Meeting {
         }
 
         let mut participant_ids = HashSet::new();
+        let mut participant_users = HashSet::new();
         let mut agent_names = HashSet::new();
         let mut owner_seen = false;
         let mut moderator_seen = false;
@@ -250,6 +265,28 @@ impl Meeting {
         for participant in &participants {
             if !participant_ids.insert(participant.participant_id.clone()) {
                 return Err(MeetingError::DuplicateParticipantIds);
+            }
+
+            // A human speaks as a user and an agent does not, and no user may hold two seats.
+            // Together these make `participant_for_user` a total, unambiguous lookup, which is
+            // what lets the join resolve a seat from the caller's identity.
+            match (participant.is_human(), participant.user_id) {
+                (true, None) => {
+                    return Err(MeetingError::HumanParticipantWithoutUser(
+                        participant.participant_id.clone(),
+                    ));
+                }
+                (false, Some(_)) => {
+                    return Err(MeetingError::AgentParticipantWithUser(
+                        participant.participant_id.clone(),
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(user_id) = participant.user_id
+                && !participant_users.insert(user_id)
+            {
+                return Err(MeetingError::DuplicateParticipantUser(user_id.to_string()));
             }
 
             if participant.participant_id == owner_participant_id {
@@ -376,6 +413,21 @@ impl Meeting {
     ) -> Result<&MeetingParticipant, MeetingError> {
         self.participant(participant_id)
             .ok_or_else(|| MeetingError::ParticipantNotFound(participant_id.to_owned()))
+    }
+
+    /// The seat `user` holds in this meeting, if any. Unique by the `Meeting::new` invariant.
+    pub fn participant_for_user(&self, user: UserId) -> Option<&MeetingParticipant> {
+        self.participants
+            .iter()
+            .find(|participant| participant.user_id == Some(user))
+    }
+
+    pub fn require_participant_for_user(
+        &self,
+        user: UserId,
+    ) -> Result<&MeetingParticipant, MeetingError> {
+        self.participant_for_user(user)
+            .ok_or_else(|| MeetingError::UserNotParticipant(user.to_string()))
     }
 
     pub fn require_human_participant(
@@ -986,6 +1038,96 @@ mod tests {
         }
     }
 
+    /// The rules that make a seat something you have to *be*. Without them a human seat could
+    /// exist with no owning user (nobody could ever be rejected from it), or two seats could
+    /// share a user (resolving the caller's seat would be ambiguous).
+    #[test]
+    fn a_human_participant_must_be_bound_to_a_user() {
+        let owner = MeetingParticipant {
+            user_id: None,
+            ..human_participant("owner-1", MeetingRole::Owner, "Frederic")
+        };
+        let moderator = agent_participant("agent-1", MeetingRole::Moderator, "Moderator");
+        let error = Meeting::new(
+            OrganizationId::from_number(1),
+            "Leadership".to_owned(),
+            owner.participant_id.clone(),
+            moderator.participant_id.clone(),
+            vec![owner, moderator],
+            vec![agenda_item("agenda-1", "review launch")],
+            "2026-03-14T08:00:00Z".to_owned(),
+        )
+        .expect_err("a human seat with no user must be rejected");
+        assert_eq!(
+            error,
+            MeetingError::HumanParticipantWithoutUser("owner-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_agent_participant_must_not_be_bound_to_a_user() {
+        let owner = human_participant("owner-1", MeetingRole::Owner, "Frederic");
+        let moderator = MeetingParticipant {
+            user_id: Some(user_for("agent-1")),
+            ..agent_participant("agent-1", MeetingRole::Moderator, "Moderator")
+        };
+        let error = Meeting::new(
+            OrganizationId::from_number(1),
+            "Leadership".to_owned(),
+            owner.participant_id.clone(),
+            moderator.participant_id.clone(),
+            vec![owner, moderator],
+            vec![agenda_item("agenda-1", "review launch")],
+            "2026-03-14T08:00:00Z".to_owned(),
+        )
+        .expect_err("an agent seat bound to a user must be rejected");
+        assert_eq!(
+            error,
+            MeetingError::AgentParticipantWithUser("agent-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn one_user_may_not_hold_two_seats() {
+        let user = user_for("owner-1");
+        let owner = human_participant_of("owner-1", MeetingRole::Owner, "Frederic", user);
+        let moderator = agent_participant("agent-1", MeetingRole::Moderator, "Moderator");
+        let twin = human_participant_of("human-2", MeetingRole::Participant, "Also Frederic", user);
+        let error = Meeting::new(
+            OrganizationId::from_number(1),
+            "Leadership".to_owned(),
+            owner.participant_id.clone(),
+            moderator.participant_id.clone(),
+            vec![owner, moderator, twin],
+            vec![agenda_item("agenda-1", "review launch")],
+            "2026-03-14T08:00:00Z".to_owned(),
+        )
+        .expect_err("a user holding two seats must be rejected");
+        assert_eq!(
+            error,
+            MeetingError::DuplicateParticipantUser(user.to_string())
+        );
+    }
+
+    #[test]
+    fn a_seat_resolves_from_the_user_that_owns_it() {
+        let meeting = sample_meeting();
+        let participant = meeting
+            .require_participant_for_user(user_for("owner-1"))
+            .expect("the owner's user holds the owner seat");
+        assert_eq!(participant.participant_id, "owner-1");
+    }
+
+    #[test]
+    fn a_user_with_no_seat_cannot_resolve_one() {
+        let meeting = sample_meeting();
+        let stranger = user_for("nobody");
+        assert_eq!(
+            meeting.require_participant_for_user(stranger),
+            Err(MeetingError::UserNotParticipant(stranger.to_string()))
+        );
+    }
+
     fn sample_meeting() -> Meeting {
         let owner = human_participant("owner-1", MeetingRole::Owner, "Frederic");
         let moderator = agent_participant("agent-1", MeetingRole::Moderator, "Moderator");
@@ -1004,9 +1146,28 @@ mod tests {
         .expect("sample meeting should be valid")
     }
 
+    /// Each human seat gets its own user, derived from the participant id so tests stay
+    /// deterministic and no two seats accidentally share one (which `Meeting::new` rejects).
     fn human_participant(id: &str, role: MeetingRole, name: &str) -> MeetingParticipant {
+        human_participant_of(id, role, name, user_for(id))
+    }
+
+    fn user_for(participant_id: &str) -> UserId {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        participant_id.hash(&mut hasher);
+        UserId::from_number(hasher.finish())
+    }
+
+    fn human_participant_of(
+        id: &str,
+        role: MeetingRole,
+        name: &str,
+        user: UserId,
+    ) -> MeetingParticipant {
         MeetingParticipant {
             participant_id: id.to_owned(),
+            user_id: Some(user),
             kind: ParticipantKind::Human,
             meeting_role: role,
             name: name.to_owned(),
@@ -1018,6 +1179,7 @@ mod tests {
     fn agent_participant(id: &str, role: MeetingRole, name: &str) -> MeetingParticipant {
         MeetingParticipant {
             participant_id: id.to_owned(),
+            user_id: None,
             kind: ParticipantKind::Agent,
             meeting_role: role,
             name: name.to_owned(),

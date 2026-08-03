@@ -8,6 +8,7 @@ use wiab_core::meeting::{
 };
 use wiab_core::organization::OrganizationId;
 use wiab_core::repository::{RepoError, SaveError, Version};
+use wiab_core::user::UserId;
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryMeetingRepository {
@@ -19,13 +20,17 @@ impl InMemoryMeetingRepository {
         Self::default()
     }
 
-    pub fn with_seed_data(now: impl Fn() -> String) -> Self {
+    /// Seeds the demo meeting owned by `owner`. The owner has to be a real user: a human seat
+    /// is bound to the user allowed to occupy it, so there is no such thing as a seeded
+    /// participant nobody owns.
+    pub fn with_seed_data(owner: UserId, now: impl Fn() -> String) -> Self {
         let repository = Self::new();
 
         // Seed at construction time (no concurrency): insert the meeting directly at
         // version 1 rather than going through the async `save`.
         let meeting = seeded_meeting(
             "Angela Meeting",
+            owner,
             "Frederic",
             &[SeedParticipant::agent(
                 "Angela",
@@ -103,6 +108,7 @@ impl<'a> SeedParticipant<'a> {
 
 fn seeded_meeting(
     title: &str,
+    owner_user: UserId,
     owner_name: &str,
     invited: &[SeedParticipant<'_>],
     agenda: &[&str],
@@ -110,6 +116,7 @@ fn seeded_meeting(
 ) -> Meeting {
     let owner = MeetingParticipant {
         participant_id: uuid::Uuid::new_v4().to_string(),
+        user_id: Some(owner_user),
         kind: ParticipantKind::Human,
         meeting_role: MeetingRole::Owner,
         name: owner_name.to_owned(),
@@ -118,6 +125,7 @@ fn seeded_meeting(
     };
     let moderator = MeetingParticipant {
         participant_id: uuid::Uuid::new_v4().to_string(),
+        user_id: None,
         kind: ParticipantKind::Agent,
         meeting_role: MeetingRole::Moderator,
         name: "Moderator".to_owned(),
@@ -132,6 +140,7 @@ fn seeded_meeting(
     for participant in invited {
         participants.push(MeetingParticipant {
             participant_id: uuid::Uuid::new_v4().to_string(),
+            user_id: None,
             kind: participant.kind,
             meeting_role: MeetingRole::Participant,
             name: participant.name.to_owned(),

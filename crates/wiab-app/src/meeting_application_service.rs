@@ -12,6 +12,7 @@ use wiab_core::{
     meeting_traits::{Clock, MeetingIntelligence, MeetingIntelligenceError, SpeechSynthesizer},
     organization::OrganizationId,
     repository::{SaveError, Version},
+    user::UserId,
 };
 
 use crate::{
@@ -69,11 +70,13 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
     pub async fn create_meeting(
         &self,
         organization_id: &str,
+        owner: UserId,
         request: CreateMeetingRequest,
     ) -> anyhow::Result<MeetingSnapshot> {
         let organization_id: OrganizationId = organization_id.parse()?;
         let _guard = self.mutation_guard.lock().await;
-        let meeting = build_meeting_from_request(organization_id, request, self.clock.as_ref())?;
+        let meeting =
+            build_meeting_from_request(organization_id, owner, request, self.clock.as_ref())?;
         let snapshot = meeting.snapshot();
         self.meeting_repository.save(meeting, Version::NEW).await?;
         Ok(snapshot)
@@ -302,6 +305,7 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
 
 fn build_meeting_from_request(
     organization_id: OrganizationId,
+    owner_user: UserId,
     request: CreateMeetingRequest,
     clock: &dyn Clock,
 ) -> anyhow::Result<Meeting> {
@@ -312,11 +316,20 @@ fn build_meeting_from_request(
 
     let mut participants = Vec::new();
 
-    let owner = build_participant_from_request(request.owner, MeetingRole::Owner)?;
+    let owner = MeetingParticipant {
+        participant_id: Uuid::new_v4().to_string(),
+        user_id: Some(owner_user),
+        kind: ParticipantKind::Human,
+        meeting_role: MeetingRole::Owner,
+        name: normalize_required(&request.owner_name, "participant name")?,
+        instructions: None,
+        voice_id: None,
+    };
     participants.push(owner.clone());
 
     let moderator = MeetingParticipant {
         participant_id: Uuid::new_v4().to_string(),
+        user_id: None,
         kind: ParticipantKind::Agent,
         meeting_role: MeetingRole::Moderator,
         name: MODERATOR_NAME.to_owned(),
@@ -365,8 +378,9 @@ fn build_participant_from_request(
     meeting_role: MeetingRole,
 ) -> anyhow::Result<MeetingParticipant> {
     match request {
-        CreateMeetingParticipant::Human { name } => Ok(MeetingParticipant {
+        CreateMeetingParticipant::Human { name, user_id } => Ok(MeetingParticipant {
             participant_id: Uuid::new_v4().to_string(),
+            user_id: Some(user_id.parse()?),
             kind: ParticipantKind::Human,
             meeting_role,
             name: normalize_required(&name, "participant name")?,
@@ -384,6 +398,7 @@ fn build_participant_from_request(
             }
             Ok(MeetingParticipant {
                 participant_id: Uuid::new_v4().to_string(),
+                user_id: None,
                 kind: ParticipantKind::Agent,
                 meeting_role,
                 name,
@@ -460,6 +475,11 @@ mod tests {
         },
         repository::RepoError,
     };
+
+    /// The user the test meetings' owner seat belongs to.
+    fn owner_user() -> UserId {
+        UserId::from_number(1)
+    }
 
     #[derive(Default, Clone)]
     struct TestMeetingRepository {
@@ -615,11 +635,10 @@ mod tests {
         let meeting = service
             .create_meeting(
                 "O-1",
+                owner_user(),
                 CreateMeetingRequest {
                     title: "Test".to_owned(),
-                    owner: CreateMeetingParticipant::Human {
-                        name: "Frederic".to_owned(),
-                    },
+                    owner_name: "Frederic".to_owned(),
                     invited_participants: vec![CreateMeetingParticipant::Agent {
                         name: "CTO".to_owned(),
                         instructions: "You are the CTO".to_owned(),
@@ -659,11 +678,10 @@ mod tests {
         let meeting = service
             .create_meeting(
                 "O-1",
+                owner_user(),
                 CreateMeetingRequest {
                     title: "Test".to_owned(),
-                    owner: CreateMeetingParticipant::Human {
-                        name: "Frederic".to_owned(),
-                    },
+                    owner_name: "Frederic".to_owned(),
                     invited_participants: vec![CreateMeetingParticipant::Agent {
                         name: "Angela".to_owned(),
                         instructions: "You are Angela".to_owned(),
@@ -696,13 +714,13 @@ mod tests {
         let meeting = service
             .create_meeting(
                 "O-1",
+                owner_user(),
                 CreateMeetingRequest {
                     title: "Test".to_owned(),
-                    owner: CreateMeetingParticipant::Human {
-                        name: "Frederic".to_owned(),
-                    },
+                    owner_name: "Frederic".to_owned(),
                     invited_participants: vec![CreateMeetingParticipant::Human {
                         name: "Alice".to_owned(),
+                        user_id: "U-9".to_owned(),
                     }],
                     agenda: vec!["review".to_owned()],
                 },
@@ -738,11 +756,10 @@ mod tests {
         let meeting = service
             .create_meeting(
                 "O-1",
+                owner_user(),
                 CreateMeetingRequest {
                     title: "Test".to_owned(),
-                    owner: CreateMeetingParticipant::Human {
-                        name: "Frederic".to_owned(),
-                    },
+                    owner_name: "Frederic".to_owned(),
                     invited_participants: vec![CreateMeetingParticipant::Agent {
                         name: "CTO".to_owned(),
                         instructions: "You are the CTO".to_owned(),
@@ -792,11 +809,10 @@ mod tests {
         let meeting = service
             .create_meeting(
                 "O-1",
+                owner_user(),
                 CreateMeetingRequest {
                     title: "Test".to_owned(),
-                    owner: CreateMeetingParticipant::Human {
-                        name: "Frederic".to_owned(),
-                    },
+                    owner_name: "Frederic".to_owned(),
                     invited_participants: vec![CreateMeetingParticipant::Agent {
                         name: "CTO".to_owned(),
                         instructions: "You are the CTO".to_owned(),
@@ -841,11 +857,10 @@ mod tests {
         let meeting = service
             .create_meeting(
                 "O-1",
+                owner_user(),
                 CreateMeetingRequest {
                     title: "Test".to_owned(),
-                    owner: CreateMeetingParticipant::Human {
-                        name: "Frederic".to_owned(),
-                    },
+                    owner_name: "Frederic".to_owned(),
                     invited_participants: vec![CreateMeetingParticipant::Agent {
                         name: "CTO".to_owned(),
                         instructions: "You are the CTO".to_owned(),

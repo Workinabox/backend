@@ -233,10 +233,10 @@ async fn create_meeting(
     headers: HeaderMap,
     Json(request): Json<CreateMeetingRequest>,
 ) -> Result<Json<MeetingSnapshot>, (StatusCode, String)> {
-    require_org_role(&state, &organization_id, Operation::Write, &headers).await?;
+    let owner = require_org_role(&state, &organization_id, Operation::Write, &headers).await?;
     state
         .meeting_service
-        .create_meeting(&organization_id, request)
+        .create_meeting(&organization_id, owner, request)
         .await
         .map(Json)
         .map_err(bad_request)
@@ -1332,13 +1332,13 @@ async fn require_owner(
 }
 
 /// Requires the caller hold a sufficient org-level role for the operation (e.g. creating
-/// a repo).
+/// a repo). Returns the caller, for the handlers that need to record who acted.
 async fn require_org_role(
     state: &AppState,
     org_id: &str,
     operation: Operation,
     headers: &HeaderMap,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<UserId, (StatusCode, String)> {
     let (user, _scope) = authenticate(state, headers).await?;
     let org: OrganizationId = org_id
         .parse()
@@ -1348,7 +1348,7 @@ async fn require_org_role(
         .authorize_org(user, org, operation)
         .await
         .map_err(internal)?;
-    if allowed { Ok(()) } else { Err(forbidden()) }
+    if allowed { Ok(user) } else { Err(forbidden()) }
 }
 
 /// Requires the caller hold a sufficient role on the repo for the operation (token scope
@@ -1427,7 +1427,8 @@ async fn require_project_org_role(
     else {
         return Err(not_found("project", project_id));
     };
-    require_org_role(state, &project.organization_id, operation, headers).await
+    require_org_role(state, &project.organization_id, operation, headers).await?;
+    Ok(())
 }
 
 /// Requires the caller hold `operation` on the org that owns a board (via its project). 404 if
@@ -1465,7 +1466,8 @@ async fn require_agent_org_role(
     else {
         return Err(not_found("agent", agent_id));
     };
-    require_org_role(state, &agent.organization_id, operation, headers).await
+    require_org_role(state, &agent.organization_id, operation, headers).await?;
+    Ok(())
 }
 
 /// Requires the caller hold `operation` on the org that owns a task (via its board). 404 if
@@ -1503,7 +1505,8 @@ async fn require_team_org_role(
     else {
         return Err(not_found("team", team_id));
     };
-    require_org_role(state, &team.organization_id, operation, headers).await
+    require_org_role(state, &team.organization_id, operation, headers).await?;
+    Ok(())
 }
 
 /// Requires the caller hold `operation` on the org that owns a work (via its project). 404 if the
