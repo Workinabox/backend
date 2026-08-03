@@ -3,7 +3,7 @@ use std::sync::Arc;
 use authbox_core::auth::{
     AuthError, Clock, CredentialStore, EmailSender, PasswordCredential, PasswordHasher,
     SecretGenerator, SessionStore, UserDirectory, VerificationPurpose, VerificationToken,
-    VerificationTokenStore,
+    VerificationTokenStore, validate_password,
 };
 use authbox_core::credential::TokenHasher;
 
@@ -105,6 +105,7 @@ where
     /// Confirm a reset: consume the token, set the new password, and revoke every session for
     /// the user (a reset implies the account may be compromised).
     pub async fn confirm(&self, token: &str, new_password: &str) -> Result<(), AuthError> {
+        validate_password(new_password)?;
         let token_hash = self.token_hasher.hash(token);
         let Some(record) = self.verifications.consume(&token_hash).await? else {
             return Err(AuthError::InvalidCredentials);

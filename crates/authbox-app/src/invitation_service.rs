@@ -3,6 +3,7 @@ use std::sync::Arc;
 use authbox_core::auth::{
     AuthError, Clock, CredentialStore, EmailSender, PasswordCredential, PasswordHasher,
     PrincipalId, SecretGenerator, VerificationPurpose, VerificationToken, VerificationTokenStore,
+    validate_password,
 };
 use authbox_core::credential::TokenHasher;
 
@@ -97,6 +98,7 @@ where
         token: &str,
         password: &str,
     ) -> Result<PrincipalId, AuthError> {
+        validate_password(password)?;
         let principal = self.consume(token, VerificationPurpose::Invite).await?;
         let phc = self.hash(password.to_owned()).await?;
         self.credentials

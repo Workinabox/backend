@@ -723,7 +723,13 @@ async fn seed_owner(
         owner.id
     );
     if is_default {
-        info!("owner password is the local development default; set WIAB_DEV_OWNER_PASSWORD");
+        // Safe to print: this is a compile-time constant in `config.rs`, reachable only on a
+        // loopback base URL. Nothing is disclosed that is not already in the repository, and a
+        // developer should not have to go hunting for it.
+        info!(
+            "owner password is the local development default ('{password}'); \
+             set WIAB_DEV_OWNER_PASSWORD to override"
+        );
     }
     write_bootstrap_token(&issued.plaintext)?;
     Ok(())

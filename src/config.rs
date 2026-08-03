@@ -216,7 +216,11 @@ pub fn seed_owner_password(
 }
 
 /// Password used for the seeded owner when developing against a local base URL.
-const LOCAL_DEV_OWNER_PASSWORD: &str = "owner";
+///
+/// Must satisfy the shared password policy — the previous value ("owner") did not, which the
+/// policy change surfaced immediately. Not a secret: it is a constant in this file, only ever
+/// used on loopback, and printed at boot so a developer does not have to come looking for it.
+const LOCAL_DEV_OWNER_PASSWORD: &str = "owner-local-dev";
 
 /// Whether the advertised base URL points at the developer's own machine.
 fn is_local_base_url(base_url: &str) -> bool {
@@ -255,6 +259,13 @@ mod tests {
             error.to_string().contains("WIAB_DEV_OWNER_PASSWORD"),
             "the error should say how to fix it: {error}"
         );
+    }
+
+    #[test]
+    fn the_local_default_satisfies_the_password_policy() {
+        // A default the policy rejects would make a fresh local checkout fail to boot.
+        authbox_core::auth::validate_password(LOCAL_DEV_OWNER_PASSWORD)
+            .expect("the local dev default must be a usable password");
     }
 
     #[test]
