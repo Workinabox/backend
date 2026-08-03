@@ -354,6 +354,31 @@ async fn listing_a_projects_repos_requires_a_role_on_its_organization() {
     assert_eq!(member.status(), StatusCode::OK);
 }
 
+/// Meetings belong to an organization, so listing them is an organization read. Its sibling
+/// `create_meeting` was already gated; this one was not, which is how the participant ids that
+/// H2 turned on got handed to any authenticated caller.
+#[tokio::test]
+async fn listing_meetings_requires_a_role_on_the_organization() {
+    let fixture = repo_fixture().await;
+    let stranger = send_as(
+        &fixture.router,
+        Method::GET,
+        "/organizations/O-1/meetings",
+        Some(&fixture.stranger_token),
+    )
+    .await;
+    assert_eq!(stranger.status(), StatusCode::FORBIDDEN);
+
+    let member = send_as(
+        &fixture.router,
+        Method::GET,
+        "/organizations/O-1/meetings",
+        Some(&fixture.member_token),
+    )
+    .await;
+    assert_eq!(member.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn git_smart_http_authenticates_itself() {
     let router = test_router().await;

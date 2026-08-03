@@ -217,7 +217,9 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
 async fn list_meetings(
     State(state): State<AppState>,
     Path(organization_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<MeetingSnapshot>>, (StatusCode, String)> {
+    require_org_role(&state, &organization_id, Operation::Read, &headers).await?;
     Ok(Json(
         state
             .meeting_service
