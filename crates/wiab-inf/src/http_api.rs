@@ -1541,8 +1541,19 @@ fn forbidden() -> (StatusCode, String) {
     (StatusCode::FORBIDDEN, "insufficient permissions".to_owned())
 }
 
+/// A 5xx the client can quote back to an operator, with the detail kept server-side.
+///
+/// The underlying `anyhow`/`git2`/database error text names on-disk paths, SQL, and library
+/// internals — a free map of the backend for anyone who can provoke an error. The client gets
+/// a correlation id instead, and the same id is logged next to the real message, so the
+/// information is still one grep away for whoever is entitled to it.
 fn internal(err: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+    let error_id = uuid::Uuid::new_v4();
+    tracing::error!(%error_id, error = %err, "internal error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("internal error (reference: {error_id})"),
+    )
 }
 
 /// Allows the caller if they are the target user or an Owner — for managing a user's own
@@ -2439,7 +2450,15 @@ async fn unfulfill_done(
         .map_err(bad_request)
 }
 
+/// A 4xx carrying the domain's own validation message — that text is the API's contract and
+/// callers need it ("agenda must contain at least one item").
+///
+/// Logged as well as returned: the application services return `anyhow::Error`, so an
+/// infrastructure failure can in principle reach here instead of the 5xx path and take its
+/// message with it. Distinguishing the two properly means typed errors across the application
+/// layer, which is a larger change than this one.
 fn bad_request(err: anyhow::Error) -> (StatusCode, String) {
+    tracing::debug!(error = %err, "rejected request");
     (StatusCode::BAD_REQUEST, err.to_string())
 }
 
@@ -2462,6 +2481,19 @@ async fn signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_500_carries_a_reference_not_the_underlying_error() {
+        let (status, body) = internal("connection to db.internal:5432 failed: no such table");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.starts_with("internal error (reference: "), "{body}");
+        for internal_detail in ["db.internal", "5432", "no such table"] {
+            assert!(
+                !body.contains(internal_detail),
+                "the 500 body leaked {internal_detail}: {body}"
+            );
+        }
+    }
 
     #[test]
     fn only_same_origin_paths_survive_return_to_sanitizing() {
