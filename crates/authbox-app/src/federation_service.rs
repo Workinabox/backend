@@ -108,9 +108,16 @@ where
             .complete(connection, code, flow.pkce_verifier(), flow.nonce())
             .await?;
 
-        // Existing link wins — `subject` is the durable key, never the email.
+        // Existing link wins — `subject` is the durable key, never the email. The user must
+        // still be permitted to authenticate: this branch never consults the directory by
+        // email, so without an explicit check a deactivated user with a linked identity could
+        // log straight back in through the IdP and off-boarding would not hold for SSO.
         if let Some(identity) = self.federated.find(&claims.issuer, &claims.subject).await? {
-            return Ok((identity.principal().clone(), flow.return_to().to_owned()));
+            let principal = identity.principal().clone();
+            if !self.directory.may_authenticate(&principal).await? {
+                return Err(AuthError::InvalidCredentials);
+            }
+            return Ok((principal, flow.return_to().to_owned()));
         }
 
         let connection_config = self.connection(connection)?;
@@ -236,6 +243,8 @@ mod tests {
     struct FakeDirectory {
         by_email: Mutex<HashMap<String, String>>,
         next_id: Mutex<u64>,
+        /// Principals the host has deactivated; they must not be able to authenticate.
+        deactivated: Mutex<std::collections::HashSet<String>>,
     }
     impl UserDirectory for FakeDirectory {
         async fn find_by_email(&self, email: &str) -> Result<Option<PrincipalId>, AuthError> {
@@ -245,6 +254,13 @@ mod tests {
                 .unwrap()
                 .get(email)
                 .map(PrincipalId::new))
+        }
+        async fn may_authenticate(&self, principal: &PrincipalId) -> Result<bool, AuthError> {
+            Ok(!self
+                .deactivated
+                .lock()
+                .unwrap()
+                .contains(principal.as_str()))
         }
         async fn provision(&self, email: &str, _name: &str) -> Result<PrincipalId, AuthError> {
             let mut next = self.next_id.lock().unwrap();
@@ -287,8 +303,10 @@ mod tests {
                 client_secret: "secret".to_owned(),
                 scopes: vec!["openid".to_owned(), "email".to_owned()],
                 redirect_uri: "https://app/api/auth/oidc/enterprise/callback".to_owned(),
+                // Mirrors the deployed config in `bootstrap.rs`: auto-link is only safe
+                // alongside a verified email.
                 auto_link_verified_email: true,
-                require_email_verified: false,
+                require_email_verified: true,
             },
         ]
     }
@@ -380,16 +398,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enterprise_accepts_an_unverified_email() {
-        // An enterprise IdP (e.g. Microsoft Entra) is authoritative for its users and may
-        // omit email_verified; the connection trusts the email and JIT-provisions.
-        let svc = service(claims("ada@corp.com", false), FakeDirectory::default());
+    async fn enterprise_rejects_an_unverified_email() {
+        // The enterprise connection auto-links: it adopts whatever local account matches the
+        // asserted email. Trusting an unverified address there means an IdP that can be
+        // induced to emit a victim's email hands over their account, so the claim is required.
+        let directory = FakeDirectory::default();
+        directory
+            .by_email
+            .lock()
+            .unwrap()
+            .insert("ada@corp.com".to_owned(), "U-7".to_owned());
+        let svc = service(claims("ada@corp.com", false), directory);
+        svc.begin_login("enterprise", "/works").await.unwrap();
+        assert!(matches!(
+            svc.complete_login("enterprise", "st", "code")
+                .await
+                .unwrap_err(),
+            AuthError::FederationFailed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_deactivated_user_cannot_log_back_in_through_sso() {
+        // Deactivation bars password login and revokes sessions, but the existing-link branch
+        // never consults the directory by email — without an explicit check, off-boarding
+        // would simply not apply to anyone who had linked SSO.
+        let directory = FakeDirectory::default();
+        directory
+            .by_email
+            .lock()
+            .unwrap()
+            .insert("ada@corp.com".to_owned(), "U-7".to_owned());
+        let svc = service(claims("ada@corp.com", true), directory);
+
+        // First login links the identity.
         svc.begin_login("enterprise", "/works").await.unwrap();
         let (principal, _) = svc
             .complete_login("enterprise", "st", "code")
             .await
-            .unwrap();
-        assert_eq!(principal.as_str(), "U-1");
+            .expect("an active user logs in");
+        assert_eq!(principal.as_str(), "U-7");
+
+        svc.directory
+            .deactivated
+            .lock()
+            .unwrap()
+            .insert("U-7".to_owned());
+
+        svc.begin_login("enterprise", "/works").await.unwrap();
+        assert!(matches!(
+            svc.complete_login("enterprise", "st", "code")
+                .await
+                .unwrap_err(),
+            AuthError::InvalidCredentials
+        ));
     }
 
     #[tokio::test]

@@ -472,9 +472,13 @@ pub async fn build_app_state(
                 auth_settings.base_url
             ),
             auto_link_verified_email: true,
-            // An enterprise IdP is authoritative for its users and may omit
-            // email_verified (e.g. Microsoft Entra) — don't require the claim.
-            require_email_verified: false,
+            // Paired with auto-link above, this must stay true. Auto-link adopts whatever
+            // local account matches the asserted email, so trusting an *unverified* email
+            // means an IdP that can be induced to emit a victim's address hands over their
+            // account — including a password-based Owner. An enterprise IdP that omits
+            // `email_verified` must therefore not auto-link; requiring the claim is the
+            // safe half of that pair to enforce here.
+            require_email_verified: true,
         });
     }
     let federation_service = if connections.is_empty() {

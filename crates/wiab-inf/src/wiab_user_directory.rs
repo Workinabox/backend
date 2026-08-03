@@ -29,6 +29,16 @@ impl UserDirectory for WiabUserDirectory {
         Ok(user.map(|id| PrincipalId::new(id.to_string())))
     }
 
+    async fn may_authenticate(&self, principal: &PrincipalId) -> Result<bool, AuthError> {
+        let snapshot = self
+            .user_service
+            .user_snapshot(principal.as_str())
+            .await
+            .map_err(|error| AuthError::Backend(error.to_string()))?;
+        // An unknown principal is not permitted either — the same answer `find_by_email` gives.
+        Ok(snapshot.is_some_and(|user| user.state == "active"))
+    }
+
     async fn provision(&self, email: &str, name: &str) -> Result<PrincipalId, AuthError> {
         let snapshot = self
             .user_service
