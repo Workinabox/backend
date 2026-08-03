@@ -215,6 +215,26 @@ pub fn seed_owner_password(
     }
 }
 
+/// Refuses to start with an ephemeral git SSH host key on a non-local deployment.
+///
+/// With no key path configured the SSH transport generates a fresh host key every boot, on a
+/// `0.0.0.0` port. Clients then see a different key each restart, and the only way to keep
+/// using the server is to accept the change — which is exactly the habit that makes SSH's
+/// man-in-the-middle protection worthless. Fine on a developer's machine, not on anything
+/// clients pin.
+pub fn require_persistent_ssh_host_key(
+    host_key_path: Option<&str>,
+    base_url: &str,
+) -> anyhow::Result<()> {
+    if host_key_path.is_some() || is_local_base_url(base_url) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to serve git SSH with an ephemeral host key for a non-local deployment \
+         ({base_url}): set WIAB_GIT_SSH_HOST_KEY to a persistent key"
+    )
+}
+
 /// Password used for the seeded owner when developing against a local base URL.
 ///
 /// Must satisfy the shared password policy — the previous value ("owner") did not, which the
@@ -284,6 +304,19 @@ mod tests {
             assert_eq!(password, "s3cret");
             assert!(!is_default);
         }
+    }
+
+    #[test]
+    fn a_non_local_deployment_requires_a_persistent_ssh_host_key() {
+        assert!(require_persistent_ssh_host_key(None, "https://wiab.example.com").is_err());
+        assert!(
+            require_persistent_ssh_host_key(
+                Some("/etc/wiab/ssh_host_ed25519_key"),
+                "https://wiab.example.com"
+            )
+            .is_ok()
+        );
+        assert!(require_persistent_ssh_host_key(None, "http://localhost:3000").is_ok());
     }
 
     #[test]
