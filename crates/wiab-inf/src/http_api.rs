@@ -42,6 +42,40 @@ use crate::{AppState, handle_signal_socket};
 /// Largest JSON/form request body accepted on the ordinary API routes.
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 
+/// Security headers applied to every response.
+///
+/// This is a JSON API, not a page, so the page-oriented policies are the strict ones: nothing
+/// here should ever be framed, script-evaluated, or sniffed into a different content type. A
+/// browser reaching an API response directly — an error body, a redirect target — should treat
+/// it as inert.
+///
+/// `nosniff` is the one with teeth: without it a browser may re-interpret a JSON response as
+/// HTML or script based on content, which is how an API becomes an XSS sink. The CSP is
+/// deliberately minimal rather than a copy of the frontend's; an API serves no scripts,
+/// styles or fonts of its own.
+const SECURITY_HEADERS: [(header::HeaderName, &str); 4] = [
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::REFERRER_POLICY, "no-referrer"),
+    (
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    ),
+];
+
+/// Adds [`SECURITY_HEADERS`] to every response, without overwriting one a handler set
+/// deliberately.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    for (name, value) in SECURITY_HEADERS {
+        if !headers.contains_key(&name) {
+            headers.insert(name, header::HeaderValue::from_static(value));
+        }
+    }
+    response
+}
+
 /// Largest body accepted on the git Smart-HTTP RPC routes, which legitimately carry packfile
 /// data. Still bounded: `decode_body` separately caps what a compressed body may inflate to.
 const MAX_GIT_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -240,6 +274,10 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             require_authentication,
         ))
+        // Outermost, so it also covers responses the layers above generate themselves — the
+        // 401 from the auth gate and the 413 from the body limit never reach a handler, and
+        // those are exactly the responses a browser is most likely to be pointed at directly.
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
 

@@ -472,6 +472,45 @@ async fn a_hostile_vm_template_is_refused_before_it_reaches_a_runtime() {
     }
 }
 
+/// A browser that reaches an API response directly should treat it as inert. `nosniff` is the
+/// one with teeth: without it a JSON body can be re-interpreted as HTML or script based on its
+/// content, which is how an API becomes an XSS sink (M7).
+#[tokio::test]
+async fn every_response_carries_the_security_headers() {
+    let router = test_router().await;
+    // A 200 and a 401 — an error body is still a body a browser can be pointed at.
+    for (path, expected) in [
+        ("/health", StatusCode::OK),
+        ("/users", StatusCode::UNAUTHORIZED),
+    ] {
+        let response = send(&router, Method::GET, path).await;
+        assert_eq!(response.status(), expected, "{path}");
+        let headers = response.headers();
+        assert_eq!(
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .map(|v| v.to_str().unwrap()),
+            Some("nosniff"),
+            "{path} must not be sniffable"
+        );
+        assert_eq!(
+            headers
+                .get(header::X_FRAME_OPTIONS)
+                .map(|v| v.to_str().unwrap()),
+            Some("DENY"),
+            "{path} must not be frameable"
+        );
+        assert!(
+            headers.contains_key(header::CONTENT_SECURITY_POLICY),
+            "{path} must carry a CSP"
+        );
+        assert!(
+            headers.contains_key(header::REFERRER_POLICY),
+            "{path} must carry a referrer policy"
+        );
+    }
+}
+
 #[tokio::test]
 async fn git_smart_http_authenticates_itself() {
     let router = test_router().await;
