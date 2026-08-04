@@ -188,6 +188,7 @@ pub struct Sfu {
     agent_source_creation_guard: Mutex<()>,
     listen_ip: IpAddr,
     announced_address: Option<String>,
+    rtc_port_range: std::ops::RangeInclusive<u16>,
     transcriber: Option<Arc<LocalTranscriber>>,
     meeting_service: Arc<MeetingApplicationService<InMemoryMeetingRepository>>,
 }
@@ -201,6 +202,13 @@ const AGENT_AUDIO_CONSUMER_ATTACH_GRACE_MS: u64 = 250;
 pub struct MediaConfig {
     pub listen_ip: IpAddr,
     pub announced_address: Option<String>,
+    /// UDP/TCP ports mediasoup may bind for WebRTC transports.
+    ///
+    /// Bounded on purpose. With no range mediasoup picks from the whole ephemeral space, which
+    /// forces the host firewall to open ~50,000 ports to any source to let media through. A
+    /// pinned range lets that rule be three orders of magnitude smaller. Two transports are
+    /// allocated per peer (send and recv), so the default carries ~500 concurrent peers.
+    pub rtc_port_range: std::ops::RangeInclusive<u16>,
     pub whisper: Option<WhisperConfig>,
 }
 
@@ -213,13 +221,33 @@ impl MediaConfig {
         let announced_address = std::env::var("WIAB_MEDIASOUP_ANNOUNCED_ADDRESS")
             .ok()
             .or_else(|| Some("10.0.2.2".to_owned()));
+        let min_port = env_port("WIAB_MEDIASOUP_MIN_PORT", DEFAULT_RTC_MIN_PORT);
+        let max_port = env_port("WIAB_MEDIASOUP_MAX_PORT", DEFAULT_RTC_MAX_PORT);
+        if min_port > max_port {
+            anyhow::bail!(
+                "WIAB_MEDIASOUP_MIN_PORT ({min_port}) is above WIAB_MEDIASOUP_MAX_PORT ({max_port})"
+            );
+        }
         let whisper = WhisperConfig::from_env()?;
         Ok(Self {
             listen_ip,
             announced_address,
+            rtc_port_range: min_port..=max_port,
             whisper,
         })
     }
+}
+
+/// Default WebRTC media port range. Must match the range the host firewall opens — see
+/// `iac/scripts/provision.sh`.
+const DEFAULT_RTC_MIN_PORT: u16 = 40000;
+const DEFAULT_RTC_MAX_PORT: u16 = 40999;
+
+fn env_port(name: &str, default: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 impl Sfu {
@@ -254,11 +282,14 @@ impl Sfu {
 
         let listen_ip = media.listen_ip;
         let announced_address = media.announced_address.clone();
+        let rtc_port_range = media.rtc_port_range.clone();
 
         info!(
-            "initialized mediasoup router (listen_ip={}, announced_address={})",
+            "initialized mediasoup router (listen_ip={}, announced_address={}, rtc_ports={}-{})",
             listen_ip,
-            announced_address.as_deref().unwrap_or("<none>")
+            announced_address.as_deref().unwrap_or("<none>"),
+            rtc_port_range.start(),
+            rtc_port_range.end()
         );
 
         Ok(Self {
@@ -270,6 +301,7 @@ impl Sfu {
             agent_source_creation_guard: Mutex::new(()),
             listen_ip,
             announced_address,
+            rtc_port_range,
             transcriber,
             meeting_service,
         })
@@ -320,7 +352,7 @@ impl Sfu {
                 announced_address: self.announced_address.clone(),
                 expose_internal_ip: false,
                 port: None,
-                port_range: None,
+                port_range: Some(self.rtc_port_range.clone()),
                 flags: None,
                 send_buffer_size: None,
                 recv_buffer_size: None,
