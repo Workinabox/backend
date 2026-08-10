@@ -41,3 +41,13 @@
 - Favor smaller commits. Single responsability that concentrate on one concept/part/story/feature/struct
 - Single responsability principle always
 - Never EVER deploy anything to anywhere without being explicitly told to. Things like terraform apply for example.
+
+<!-- The bullets above are the shared core, identical across every repo's CLAUDE.md — edit all copies together. Below is backend-specific. -->
+
+## backend-specific
+
+- DDD layering is enforced across **both** crate families — `wiab-{core,app,inf}` and `authbox-{core,app,inf}`: domain in core (no internal deps), use cases in app, adapters in inf, composition only in the `wiab` binary. Plus `wiab-telemetry` and the zero-dep in-guest `wiab-agent`.
+- Typed errors (`thiserror`) in libraries; `anyhow` only at the binary boundary.
+- CI runs `cargo audit` and fails on advisories; new deps must pass it.
+- Env config is centralized in `src/config.rs` plus component `from_env()` sites — resolve env there, not scattered `std::env::var` calls.
+- Build gotcha: a `cargo build` "File exists" panic from `llama-cpp-sys` means stale `lib*llama*`/`lib*ggml*` symlinks in `target/debug` — remove them and rebuild.

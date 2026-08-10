@@ -1,16 +1,31 @@
 # backend
 
-The main process of workinabox. Contains everything to run agent farms and interact with them.
+The main process of workinabox — package `wiab`. See
+[`docs/OVERVIEW.md`](../docs/OVERVIEW.md) for how it fits the wider system.
 
 ## Overview
 
-The backend is a Rust service built on Tokio and Axum. It currently provides:
+A Rust service on Tokio and axum, structured as eight crates in two DDD families
+(`wiab-{core,app,inf}` and the product-neutral `authbox-{core,app,inf}` identity
+kit) plus `wiab-telemetry` and the in-guest `wiab-agent`. It provides:
 
-- an HTTP health endpoint
-- meeting discovery
-- a WebSocket signaling endpoint
-- a mediasoup-based SFU for real-time audio
-- optional local speech-to-text using Whisper
+- **Identity & access** (`authbox`): local password login (argon2id) with
+  server-side sessions, Google + enterprise OIDC/SSO, PATs and SSH keys, invite,
+  reset, verify; role/scope authorization (`Read<Write<Admin<Owner` over
+  `Org⊇Project⊇Repo`).
+- **Git hosting**: a bare repo per `Repo` aggregate, real `clone`/`fetch`/`push`
+  over smart-HTTP and SSH, plus a REST browse/commit API.
+- **Project model**: orgs, projects, repos, works (+ acceptance criteria), a
+  7-state task lifecycle, boards, agents, and teams.
+- **Agent execution**: teams that claim tasks and run in VM sandboxes
+  (Firecracker on KVM, else Docker); two runtimes (Rust `wiab-agent` default,
+  Python LangGraph via `WIAB_AGENT_RUNTIME=langgraph`).
+- **Meetings**: a WebSocket signaling endpoint + mediasoup SFU, local Whisper
+  STT, and llama-driven agent replies and minutes. (No working client today —
+  see OVERVIEW.)
+- **Messaging**: a transactional outbox published to NATS.
+- **Telemetry**: OpenTelemetry traces/metrics/logs and an audit stream.
+- **Health**: `GET /health`.
 
 ## Running locally
 
@@ -25,6 +40,42 @@ For backend-only iteration against a Dockerized Postgres, [`scripts/run-pg.sh`](
 starts the database in Docker and runs the backend on the host with `cargo run`.
 
 ## Environment variables
+
+The backend reads ~78 `WIAB_*`/`OTEL_*`/`RUST_LOG` variables. The **canonical,
+complete inventory** is the code: `src/config.rs` (resolved once at startup) plus
+the component `*::from_env()` sites in `wiab-inf` (Firecracker, Docker, NATS,
+Llama, Whisper, media) and `wiab-telemetry/src/config.rs`. This README documents
+only the load-bearing and commonly-set ones; when in doubt, read `config.rs`.
+
+### Core
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `WIAB_PERSISTENCE` | `postgres` | `postgres` or `memory` (in-memory, for tests) |
+| `DATABASE_URL` | `postgres://wiab:wiab@localhost:5432/wiab` | Postgres connection (when persistence is `postgres`) |
+| `WIAB_BASE_URL` | `http://localhost:3000` | Public base URL; drives cookie `Secure` and OIDC redirects |
+| `WIAB_DEV_OWNER_PASSWORD` | _(unset)_ | Seeds the bootstrap owner. **Required for a non-local `WIAB_BASE_URL` — the backend refuses to start without it there** |
+| `WIAB_TLS_CERT` / `WIAB_TLS_KEY` | _(unset)_ | PEM paths; both unset ⇒ a self-signed cert (the backend always serves HTTPS) |
+| `WIAB_GIT_ROOT` | temp dir | Directory holding the bare git repos |
+| `WIAB_GIT_SSH_ADDR` | `0.0.0.0:2222` | git-SSH transport bind address |
+| `RUST_LOG` | `wiab=info,wiab_app=info,wiab_inf=info,authbox_app=info,authbox_inf=info` | Tracing filter (the audit stream is exempt) |
+
+Auth/SSO (`WIAB_AUTH_*`, `WIAB_GOOGLE_*`, `WIAB_OIDC_*`), email
+(`WIAB_EMAIL_*`, `RESEND_API_KEY`, `WIAB_SMTP_*`), messaging (`WIAB_NATS_*`),
+the agent runtime (`WIAB_AGENT_RUNTIME` + `WIAB_TEAM_*`), and the VM runtimes
+(`WIAB_FIRECRACKER_*`, `WIAB_JAIL*`, `WIAB_DOCKER_*`) are all resolved in
+`config.rs` / the `from_env()` sites — see there for the full set.
+
+### Telemetry (operator)
+
+Off by default: JSON logs to stdout with `trace_id`/`span_id`, an always-on
+`audit` stream on stdout (never suppressed by `RUST_LOG`), spans created but not
+exported, metrics off. To turn export on, set `OTEL_EXPORTER_OTLP_ENDPOINT`
+(http/protobuf, e.g. `http://collector:4318`) — traces, metrics, and logs then
+export via OTLP. `OTEL_SERVICE_NAME` (default `wiab`) and
+`OTEL_RESOURCE_ATTRIBUTES` set resource attributes; `WIAB_OTEL_CONSOLE=1` dumps
+spans/metrics to stdout for local debugging without a collector. What was
+deliberately deferred: [`docs/TELEMETRY_FOLLOWUP.md`](../docs/TELEMETRY_FOLLOWUP.md).
 
 ### Local models (Llama LLM, Whisper STT)
 
