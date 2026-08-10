@@ -10,6 +10,7 @@ members = [
     "crates/wiab-core",
     "crates/wiab-inf",
     "crates/wiab-app",
+    "crates/wiab-telemetry",
     "crates/authbox-core",
     "crates/authbox-app",
     "crates/authbox-inf",
@@ -20,6 +21,7 @@ members = [
 wiab-core = { path = "crates/wiab-core" }
 wiab-inf = { path = "crates/wiab-inf" }
 wiab-app = { path = "crates/wiab-app" }
+wiab-telemetry = { path = "crates/wiab-telemetry" }
 authbox-core = { path = "crates/authbox-core" }
 authbox-app = { path = "crates/authbox-app" }
 authbox-inf = { path = "crates/authbox-inf" }
@@ -65,7 +67,26 @@ tower_governor = { version = "0.8", default-features = false, features = ["axum"
 governor = { version = "0.10", default-features = false, features = ["std", "quanta"] }
 http-body-util = "0.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# OpenTelemetry: every opentelemetry-* crate below moves in lockstep, and
+# tracing-opentelemetry's minor is always the opentelemetry minor + 1.
+# Upgrade the whole set together, never one crate alone.
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["trace", "metrics", "logs"] }
+# http-proto + blocking reqwest, NOT grpc-tonic: nothing here uses tonic (see
+# tower_governor above), and the batch processors run on their own OS threads,
+# so a blocked export can never block the app.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "trace",
+    "metrics",
+    "logs",
+    "http-proto",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+] }
+opentelemetry-stdout = "0.32"
+opentelemetry-appender-tracing = "0.32"
+tracing-opentelemetry = "0.33"
 uuid = { version = "1.18", features = ["v4"] }
 whisper-rs = "0.16"
 
@@ -73,6 +94,7 @@ whisper-rs = "0.16"
 wiab-app = { workspace = true }
 wiab-core = { workspace = true }
 wiab-inf = { workspace = true }
+wiab-telemetry = { workspace = true }
 authbox-app = { workspace = true }
 authbox-core = { workspace = true }
 authbox-inf = { workspace = true }

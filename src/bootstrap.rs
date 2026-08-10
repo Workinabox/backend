@@ -617,9 +617,7 @@ pub async fn build_app_state(
         sfu,
         auth_settings,
         git_root,
-        // Release builds inject WIAB_VERSION (the git tag) so the reported
-        // version matches the release; local builds fall back to Cargo.toml.
-        version: option_env!("WIAB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+        version: crate::VERSION,
     })
 }
 
