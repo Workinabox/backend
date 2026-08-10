@@ -127,6 +127,7 @@ where
         // an attacker the CPU they were trying to spend, and `InvalidCredentials` keeps the
         // response indistinguishable from any other failed login.
         if password.len() > MAX_PASSWORD_LENGTH {
+            tracing::info!(target: "audit", event = "auth.login", outcome = "failure", reason = "invalid_credentials");
             return Err(AuthError::InvalidCredentials);
         }
 
@@ -144,14 +145,19 @@ where
             None => {
                 self.verify(password.to_owned(), self.decoy_phc.clone())
                     .await?;
+                // No actor and no email: an unknown address must not enter
+                // any log, and the audit line must not distinguish this case.
+                tracing::info!(target: "audit", event = "auth.login", outcome = "failure", reason = "invalid_credentials");
                 return Err(AuthError::InvalidCredentials);
             }
         };
 
         let ok = self.verify(password.to_owned(), phc_hash).await?;
         if !ok {
+            tracing::info!(target: "audit", event = "auth.login", outcome = "failure", reason = "invalid_credentials");
             return Err(AuthError::InvalidCredentials);
         }
+        tracing::info!(target: "audit", event = "auth.login", outcome = "success", actor = %principal);
         self.establish_session(principal).await
     }
 
@@ -179,6 +185,7 @@ where
         let now = self.clock.now_rfc3339();
         let idle_expires_at = self.clock.rfc3339_in(self.config.idle_seconds);
         let absolute_expires_at = self.clock.rfc3339_in(self.config.absolute_seconds);
+        let actor = principal.as_str().to_owned();
         let session = Session::new(
             SessionId::new(),
             principal,
@@ -189,6 +196,9 @@ where
             absolute_expires_at,
         );
         self.sessions.put(session).await?;
+        // Covers the SSO path too: federation resolves the principal and then
+        // lands here for its session.
+        tracing::info!(target: "audit", event = "auth.session.established", outcome = "success", actor = %actor);
         Ok(EstablishedSession {
             cookie_secret,
             csrf_token,
@@ -246,8 +256,10 @@ where
     pub async fn logout(&self, cookie_secret: &str) -> Result<(), AuthError> {
         let token_hash = self.token_hasher.hash(cookie_secret);
         if let Some(mut session) = self.sessions.find_by_token_hash(&token_hash).await? {
+            let actor = session.principal().clone();
             session.revoke();
             self.sessions.put(session).await?;
+            tracing::info!(target: "audit", event = "auth.logout", outcome = "success", actor = %actor);
         }
         Ok(())
     }
@@ -260,9 +272,12 @@ where
         plaintext: &str,
     ) -> Result<(), AuthError> {
         validate_password(plaintext)?;
+        let actor = principal.as_str().to_owned();
         let phc_hash = self.hash(plaintext.to_owned()).await?;
         let credential = PasswordCredential::new(principal, phc_hash, self.clock.now_rfc3339());
-        self.credentials.save_password(credential).await
+        self.credentials.save_password(credential).await?;
+        tracing::info!(target: "audit", event = "auth.password.set", outcome = "success", actor = %actor);
+        Ok(())
     }
 
     /// Change a principal's own password after re-verifying the current one. Existing
@@ -274,23 +289,28 @@ where
         current: &str,
         new: &str,
     ) -> Result<(), AuthError> {
-        let credential = self
-            .credentials
-            .find_password(&principal)
-            .await?
-            .ok_or(AuthError::InvalidCredentials)?;
+        let Some(credential) = self.credentials.find_password(&principal).await? else {
+            tracing::info!(target: "audit", event = "auth.password.changed", outcome = "failure", actor = %principal, reason = "invalid_credentials");
+            return Err(AuthError::InvalidCredentials);
+        };
         if !self
             .verify(current.to_owned(), credential.phc_hash().to_owned())
             .await?
         {
+            tracing::info!(target: "audit", event = "auth.password.changed", outcome = "failure", actor = %principal, reason = "invalid_credentials");
             return Err(AuthError::InvalidCredentials);
         }
-        self.set_password(principal, new).await
+        let actor = principal.as_str().to_owned();
+        self.set_password(principal, new).await?;
+        tracing::info!(target: "audit", event = "auth.password.changed", outcome = "success", actor = %actor);
+        Ok(())
     }
 
     /// Revoke every session for a principal — used when a user is deactivated.
     pub async fn revoke_all_sessions(&self, principal: &PrincipalId) -> Result<(), AuthError> {
-        self.sessions.revoke_all_for_principal(principal).await
+        self.sessions.revoke_all_for_principal(principal).await?;
+        tracing::info!(target: "audit", event = "auth.sessions.revoked_all", outcome = "success", actor = %principal);
+        Ok(())
     }
 
     /// Run argon2 hashing off the async worker — it is deliberately CPU/memory-bound.
@@ -537,6 +557,67 @@ mod tests {
     /// The oracle this closes: an unknown address used to return before any Argon2 work, so
     /// "does this account exist" was answerable from response time alone even though every
     /// response body and status is identical.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> CaptureWriter {
+            self.clone()
+        }
+    }
+
+    /// The audit convention in one test: a failed login emits an event on the
+    /// `audit` target, and neither the email nor the password appears in it —
+    /// an unknown address must never enter any log stream.
+    #[tokio::test]
+    async fn a_failed_login_is_audited_without_the_email() {
+        // Pin the global max-level hint: without a global default, parallel
+        // tests dropping their scoped subscribers can transiently recompute
+        // it to OFF and this test's events are skipped at the macro fast path.
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(std::io::sink)
+                    .finish(),
+            );
+        });
+
+        let buffer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let service = service();
+        let result = service
+            .login_with_password("ada@example.com", "wrong-guess")
+            .await;
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        drop(guard);
+
+        let output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("audit"), "no audit line: {output}");
+        assert!(output.contains("auth.login"), "wrong event: {output}");
+        assert!(output.contains("failure"), "wrong outcome: {output}");
+        assert!(
+            !output.contains("ada@example.com"),
+            "email leaked: {output}"
+        );
+        assert!(!output.contains("wrong-guess"), "password leaked: {output}");
+    }
+
     #[tokio::test]
     async fn a_failed_login_costs_the_same_whether_or_not_the_account_exists() {
         let unknown_email = {

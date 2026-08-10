@@ -59,7 +59,9 @@ where
 
     /// Email an invite link; the recipient sets a password to activate their account.
     pub async fn invite(&self, email: &str, principal: PrincipalId) -> Result<(), AuthError> {
+        let invited = principal.as_str().to_owned();
         let token = self.issue(principal, VerificationPurpose::Invite).await?;
+        tracing::info!(target: "audit", event = "auth.invite.issued", outcome = "success", user_id = %invited);
         self.email_link(
             email,
             "You've been invited",
@@ -108,13 +110,18 @@ where
                 self.clock.now_rfc3339(),
             ))
             .await?;
+        tracing::info!(target: "audit", event = "auth.invite.accepted", outcome = "success", actor = %principal);
         Ok(principal)
     }
 
     /// Confirm a signup email: consume the token and return the principal (the caller
     /// activates the user). No password is set — it was provided at signup.
     pub async fn verify_email(&self, token: &str) -> Result<PrincipalId, AuthError> {
-        self.consume(token, VerificationPurpose::EmailVerify).await
+        let principal = self
+            .consume(token, VerificationPurpose::EmailVerify)
+            .await?;
+        tracing::info!(target: "audit", event = "auth.email.verified", outcome = "success", actor = %principal);
+        Ok(principal)
     }
 
     async fn issue(
