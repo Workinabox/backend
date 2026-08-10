@@ -68,6 +68,7 @@ impl MeetingIntelligence for HeuristicMeetingIntelligence {
             .map(|(participant_id, _, _)| participant_id.clone())
     }
 
+    #[tracing::instrument(name = "meeting.generate_reply", skip_all)]
     fn generate_agent_reply(
         &self,
         meeting: &Meeting,
@@ -83,6 +84,7 @@ impl MeetingIntelligence for HeuristicMeetingIntelligence {
         ))
     }
 
+    #[tracing::instrument(name = "meeting.generate_minutes", skip_all)]
     fn generate_minutes(
         &self,
         meeting: &Meeting,
