@@ -71,7 +71,11 @@ pub fn spawn_agent_listener(socket_path: PathBuf, vm_id: String) {
                         let bounded = stream.take((MAX_REPORT_LINE * 64) as u64);
                         let mut lines = BufReader::new(bounded).lines();
                         while let Ok(Some(line)) = lines.next_line().await {
-                            tracing::info!("agent report[{vm_id}]: {}", sanitize_report(&line));
+                            tracing::info!(
+                                wiab.vm.id = %vm_id,
+                                report = %sanitize_report(&line),
+                                "agent report"
+                            );
                         }
                     });
                 }

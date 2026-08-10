@@ -68,6 +68,7 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
     ///
     /// The aggregate is persisted `Creating` before the boot attempt so a crash mid-launch
     /// leaves a record. On a runtime failure the VM is marked `Failed` and the error surfaced.
+    #[tracing::instrument(name = "vm.provision", skip_all, fields(wiab.org.id = %organization_id))]
     pub async fn provision_vm(
         &self,
         organization_id: &str,
@@ -125,6 +126,7 @@ impl<R: VmRepository, O: OrganizationRepository, RT: VmRuntime> VmApplicationSer
     }
 
     /// Stop and tear down a running VM. Returns `Ok(None)` when no VM with the id exists.
+    #[tracing::instrument(name = "vm.stop", skip_all, fields(wiab.vm.id = %vm_id))]
     pub async fn stop_vm(&self, vm_id: &str) -> anyhow::Result<Option<VmSnapshot>> {
         let id: VmId = vm_id.parse()?;
         if self.vm_repository.get(&id).await?.is_none() {

@@ -134,6 +134,7 @@ impl FirecrackerRuntime {
     }
 
     /// Create + bring up a tap on the microVM subnet, addressed with the shared gateway IP.
+    #[tracing::instrument(name = "vm.create_tap", skip_all)]
     async fn create_tap(&self, tap: &str) -> Result<(), VmRuntimeError> {
         let gw = self.gateway_ip();
         // Idempotent-ish: delete any stale tap first (ignore failure), then create.
@@ -161,6 +162,7 @@ impl FirecrackerRuntime {
     }
 
     /// Create a blank ext4 overlay drive of `overlay_mib` MiB at `path`.
+    #[tracing::instrument(name = "vm.create_overlay", skip_all)]
     async fn create_overlay(&self, path: &std::path::Path) -> Result<(), VmRuntimeError> {
         run(Command::new("truncate").args([
             "-s",
@@ -177,6 +179,7 @@ impl FirecrackerRuntime {
     /// The agent team is not a single binary, so for `langgraph` the drive carries
     /// only the environment; the guest image supplies the interpreter, the package,
     /// and the systemd unit that starts it.
+    #[tracing::instrument(name = "vm.build_agent_drive", skip_all)]
     async fn build_agent_drive(
         &self,
         stage: &std::path::Path,
@@ -222,7 +225,19 @@ impl FirecrackerRuntime {
 }
 
 impl VmRuntime for FirecrackerRuntime {
-    async fn launch(&self, spec: VmSpec) -> Result<RuntimeHandle, VmRuntimeError> {
+    // skip_all: `spec.env` carries the team's API token.
+    #[tracing::instrument(
+        name = "vm.launch",
+        skip_all,
+        err,
+        fields(wiab.vm.id = %spec.id, wiab.vm.template = %spec.template, wiab.vm.runtime = "firecracker")
+    )]
+    async fn launch(&self, mut spec: VmSpec) -> Result<RuntimeHandle, VmRuntimeError> {
+        // Hand the guest this trace's context, so an instrumented agent
+        // runtime (wiab-team picks up TRACEPARENT) joins the launch trace.
+        if let Some(traceparent) = wiab_telemetry::current_traceparent() {
+            spec.env.push(("TRACEPARENT".to_owned(), traceparent));
+        }
         let n = Self::vm_number(&spec.id);
         let guest_ip = self.guest_ip(n);
         let gateway = self.gateway_ip();
@@ -335,6 +350,11 @@ impl VmRuntime for FirecrackerRuntime {
         Ok(RuntimeHandle { guest_ip, pid })
     }
 
+    #[tracing::instrument(
+        name = "vm.shutdown",
+        skip_all,
+        fields(wiab.vm.id = %vm_id, wiab.vm.runtime = "firecracker", wiab.vm.forced = tracing::field::Empty)
+    )]
     async fn shutdown(&self, vm_id: &str) -> Result<(), VmRuntimeError> {
         // Graceful stop: ask firecracker to Ctrl-Alt-Del the guest (a clean systemd shutdown), then
         // wait for firecracker to exit on its own; only force-kill if it doesn't. Both the API call
@@ -361,7 +381,15 @@ impl VmRuntime for FirecrackerRuntime {
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+        tracing::Span::current().record("wiab.vm.forced", !exited);
         if !exited {
+            wiab_telemetry::metrics().vm_shutdown_forced.add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "wiab.vm.runtime",
+                    "firecracker",
+                )],
+            );
             let _ = Command::new("sudo")
                 .args([ctl.as_str(), vm_id, "kill"])
                 .output()
