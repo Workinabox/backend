@@ -278,6 +278,9 @@ pub fn router(state: AppState) -> Router {
         // 401 from the auth gate and the 413 from the body limit never reach a handler, and
         // those are exactly the responses a browser is most likely to be pointed at directly.
         .layer(middleware::from_fn(security_headers))
+        // Above even that: the request span and duration must cover every
+        // response, including the ones the security/auth layers produce.
+        .layer(middleware::from_fn(crate::http_trace::trace_http))
         .with_state(state)
 }
 

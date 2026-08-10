@@ -9,6 +9,7 @@ pub mod git_http;
 pub mod git_ssh;
 pub mod heuristic_meeting_intelligence;
 pub mod http_api;
+pub mod http_trace;
 pub mod in_memory_agent_numbering;
 pub mod in_memory_agent_repository;
 pub mod in_memory_board_numbering;
