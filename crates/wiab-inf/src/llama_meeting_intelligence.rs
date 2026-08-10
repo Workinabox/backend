@@ -130,6 +130,11 @@ impl MeetingIntelligence for LlamaMeetingIntelligence {
         None
     }
 
+    #[tracing::instrument(
+        name = "meeting.generate_reply",
+        skip_all,
+        fields(wiab.meeting.id = %meeting.meeting_id, wiab.participant.id = %agent.participant_id)
+    )]
     fn generate_agent_reply(
         &self,
         meeting: &Meeting,
@@ -153,6 +158,11 @@ impl MeetingIntelligence for LlamaMeetingIntelligence {
             .map_err(|err| MeetingIntelligenceError::Message(err.to_string()))
     }
 
+    #[tracing::instrument(
+        name = "meeting.generate_minutes",
+        skip_all,
+        fields(wiab.meeting.id = %meeting.meeting_id)
+    )]
     fn generate_minutes(
         &self,
         meeting: &Meeting,

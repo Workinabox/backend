@@ -289,9 +289,14 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
                 "meeting intelligence disabled".to_owned(),
             ));
         };
-        task::spawn_blocking(move || intelligence.generate_agent_reply(&meeting, &agent, &text))
-            .await
-            .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
+        // Carry the caller's span onto the blocking thread, so the llama
+        // runtime can parent its generation span on this request.
+        let span = tracing::Span::current();
+        task::spawn_blocking(move || {
+            span.in_scope(|| intelligence.generate_agent_reply(&meeting, &agent, &text))
+        })
+        .await
+        .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
     }
 
     async fn generate_minutes_blocking(
@@ -303,7 +308,8 @@ impl<R: MeetingRepository> MeetingApplicationService<R> {
                 "meeting intelligence disabled".to_owned(),
             ));
         };
-        task::spawn_blocking(move || intelligence.generate_minutes(&meeting))
+        let span = tracing::Span::current();
+        task::spawn_blocking(move || span.in_scope(|| intelligence.generate_minutes(&meeting)))
             .await
             .map_err(|err| MeetingIntelligenceError::Message(format!("join error: {err}")))?
     }

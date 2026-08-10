@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::{num::NonZeroU32, path::PathBuf, sync::mpsc, thread};
 
 use anyhow::{Context, anyhow, bail};
@@ -10,6 +11,7 @@ use llama_cpp_2::{
     sampling::LlamaSampler,
     token::LlamaToken,
 };
+use opentelemetry::KeyValue;
 
 const INITIAL_TOKEN_BUFFER_SIZE: usize = 32;
 
@@ -37,6 +39,10 @@ struct LlamaRequest {
     messages: Vec<LlamaRuntimeMessage>,
     max_tokens: usize,
     response_tx: mpsc::Sender<anyhow::Result<String>>,
+    // Span context does not cross the mpsc into the worker thread by itself;
+    // the caller's span rides along so the generation span parents correctly.
+    span: tracing::Span,
+    enqueued_at: Instant,
 }
 
 struct LlamaWorker {
@@ -45,6 +51,9 @@ struct LlamaWorker {
     chat_template: LlamaChatTemplate,
     context_tokens: u32,
     threads: i32,
+    /// The model file stem, as the `gen_ai.request.model` attribute. Never
+    /// any message content.
+    model_label: String,
 }
 
 impl LlamaRuntime {
@@ -93,6 +102,8 @@ impl LlamaRuntime {
                 messages,
                 max_tokens,
                 response_tx,
+                span: tracing::Span::current(),
+                enqueued_at: Instant::now(),
             })
             .map_err(|_| anyhow!("llama runtime is no longer accepting requests"))?;
 
@@ -104,6 +115,7 @@ impl LlamaRuntime {
 
 impl LlamaWorker {
     fn new(config: LlamaRuntimeConfig) -> anyhow::Result<Self> {
+        let load_started = Instant::now();
         let mut backend = LlamaBackend::init()
             .map_err(|err| anyhow!("failed to initialize llama backend: {err}"))?;
 
@@ -120,18 +132,49 @@ impl LlamaWorker {
             .map_err(|err| anyhow!("failed to load model chat template: {err}"))?;
         backend.void_logs();
 
+        let model_label = config
+            .model_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_owned());
+        // One-shot, so a log line rather than a metric.
+        tracing::info!(
+            duration_ms = load_started.elapsed().as_millis() as u64,
+            model = %model_label,
+            "llama model loaded"
+        );
+
         Ok(Self {
             _backend: backend,
             model,
             chat_template,
             context_tokens: config.context_tokens,
             threads: config.threads,
+            model_label,
         })
     }
 
     fn run(self, request_rx: mpsc::Receiver<LlamaRequest>) {
         while let Ok(request) = request_rx.recv() {
-            let result = self.generate(request.messages, request.max_tokens);
+            wiab_telemetry::metrics()
+                .llama_queue_duration
+                .record(request.enqueued_at.elapsed().as_secs_f64(), &[]);
+            let span = tracing::info_span!(
+                parent: &request.span,
+                "chat",
+                otel.name = %format_args!("chat {}", self.model_label),
+                otel.status_code = tracing::field::Empty,
+                gen_ai.operation.name = "chat",
+                gen_ai.request.model = %self.model_label,
+                gen_ai.request.max_tokens = request.max_tokens as u64,
+                gen_ai.usage.input_tokens = tracing::field::Empty,
+                gen_ai.usage.output_tokens = tracing::field::Empty,
+            );
+            let result =
+                span.in_scope(|| self.generate(request.messages, request.max_tokens, &span));
+            if result.is_err() {
+                span.record("otel.status_code", "ERROR");
+            }
             let _ = request.response_tx.send(result);
         }
     }
@@ -140,7 +183,9 @@ impl LlamaWorker {
         &self,
         messages: Vec<LlamaRuntimeMessage>,
         max_tokens: usize,
+        span: &tracing::Span,
     ) -> anyhow::Result<String> {
+        let started = Instant::now();
         let chat_messages = messages
             .into_iter()
             .map(|message| {
@@ -168,6 +213,7 @@ impl LlamaWorker {
             );
         }
 
+        span.record("gen_ai.usage.input_tokens", prompt_tokens.len() as u64);
         let batch_tokens = u32::try_from(prompt_tokens.len())
             .map_err(|_| anyhow!("prompt token count does not fit into u32"))?;
         let context_params = LlamaContextParams::default()
@@ -187,8 +233,16 @@ impl LlamaWorker {
             .decode(&mut prompt_batch)
             .map_err(|err| anyhow!("failed to decode llama prompt batch: {err}"))?;
 
+        let model_attr = KeyValue::new("gen_ai.request.model", self.model_label.clone());
+        // Prefill done: the next sample produces the first output token.
+        wiab_telemetry::metrics()
+            .genai_time_to_first_token
+            .record(started.elapsed().as_secs_f64(), &[model_attr.clone()]);
+        let decode_started = Instant::now();
+
         let mut sampler = LlamaSampler::greedy();
         let mut output_bytes = Vec::new();
+        let mut output_tokens: u64 = 0;
 
         for _ in 0..max_tokens {
             let token = sampler.sample(&context, -1);
@@ -196,6 +250,7 @@ impl LlamaWorker {
                 break;
             }
             sampler.accept(token);
+            output_tokens += 1;
 
             output_bytes.extend(token_bytes(&self.model, token)?);
 
@@ -206,6 +261,33 @@ impl LlamaWorker {
                 .decode(&mut batch)
                 .map_err(|err| anyhow!("failed to decode llama generation batch: {err}"))?;
         }
+
+        span.record("gen_ai.usage.output_tokens", output_tokens);
+        let telemetry = wiab_telemetry::metrics();
+        telemetry.genai_token_usage.record(
+            prompt_tokens.len() as u64,
+            &[
+                model_attr.clone(),
+                KeyValue::new("gen_ai.token.type", "input"),
+            ],
+        );
+        telemetry.genai_token_usage.record(
+            output_tokens,
+            &[
+                model_attr.clone(),
+                KeyValue::new("gen_ai.token.type", "output"),
+            ],
+        );
+        if output_tokens > 0 {
+            telemetry.genai_time_per_output_token.record(
+                decode_started.elapsed().as_secs_f64() / output_tokens as f64,
+                &[model_attr.clone()],
+            );
+        }
+        telemetry.genai_operation_duration.record(
+            started.elapsed().as_secs_f64(),
+            &[model_attr, KeyValue::new("gen_ai.operation.name", "chat")],
+        );
 
         let text = String::from_utf8_lossy(&output_bytes).trim().to_owned();
         if text.is_empty() {
