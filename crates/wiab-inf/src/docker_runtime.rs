@@ -133,7 +133,17 @@ impl DockerRuntime {
 }
 
 impl VmRuntime for DockerRuntime {
-    async fn launch(&self, spec: VmSpec) -> Result<RuntimeHandle, VmRuntimeError> {
+    // skip_all: `spec.env` carries the team's API token.
+    #[tracing::instrument(
+        name = "vm.launch",
+        skip_all,
+        err,
+        fields(wiab.vm.id = %spec.id, wiab.vm.template = %spec.template, wiab.vm.runtime = "docker")
+    )]
+    async fn launch(&self, mut spec: VmSpec) -> Result<RuntimeHandle, VmRuntimeError> {
+        if let Some(traceparent) = wiab_telemetry::current_traceparent() {
+            spec.env.push(("TRACEPARENT".to_owned(), traceparent));
+        }
         let name = Self::container_name(&spec.id);
         let image = self.image(&spec.template);
 
@@ -219,6 +229,11 @@ impl VmRuntime for DockerRuntime {
         Ok(RuntimeHandle { guest_ip, pid })
     }
 
+    #[tracing::instrument(
+        name = "vm.shutdown",
+        skip_all,
+        fields(wiab.vm.id = %vm_id, wiab.vm.runtime = "docker")
+    )]
     async fn shutdown(&self, vm_id: &str) -> Result<(), VmRuntimeError> {
         let name = Self::container_name(vm_id);
         // Graceful stop (SIGTERM, then Docker force-kills after the timeout), then remove. 404s

@@ -148,6 +148,7 @@ impl<
     }
 
     /// Returns `Ok(None)` when the organization, the board or the repo is unknown.
+    #[tracing::instrument(name = "team.create", skip_all, fields(wiab.org.id = %organization_id))]
     pub async fn create_team(
         &self,
         organization_id: &str,
@@ -189,6 +190,7 @@ impl<
     /// provisioning fails the team is left `Failed`, not silently `Stopped`.
     ///
     /// `Ok(None)` when no team with the given id exists.
+    #[tracing::instrument(name = "team.start", skip_all, fields(wiab.team.id = %team_id))]
     pub async fn start_team(&self, team_id: &str) -> anyhow::Result<Option<TeamSnapshot>> {
         let id: TeamId = team_id.parse()?;
         let Some(team) = self.mutate(&id, |team| team.start()).await? else {
@@ -231,18 +233,21 @@ impl<
     }
 
     /// Stop taking new work but keep the container. `Ok(None)` when no such team exists.
+    #[tracing::instrument(name = "team.pause", skip_all, fields(wiab.team.id = %team_id))]
     pub async fn pause_team(&self, team_id: &str) -> anyhow::Result<Option<TeamSnapshot>> {
         let id: TeamId = team_id.parse()?;
         self.mutate(&id, |team| team.pause()).await
     }
 
     /// Take work again, on the container the team never released. `Ok(None)` when no such team.
+    #[tracing::instrument(name = "team.resume", skip_all, fields(wiab.team.id = %team_id))]
     pub async fn resume_team(&self, team_id: &str) -> anyhow::Result<Option<TeamSnapshot>> {
         let id: TeamId = team_id.parse()?;
         self.mutate(&id, |team| team.resume()).await
     }
 
     /// Tear the team down, stopping its sandbox. `Ok(None)` when no such team exists.
+    #[tracing::instrument(name = "team.stop", skip_all, fields(wiab.team.id = %team_id))]
     pub async fn stop_team(&self, team_id: &str) -> anyhow::Result<Option<TeamSnapshot>> {
         let id: TeamId = team_id.parse()?;
         let Some((team, _)) = self.team_repository.get(&id).await? else {
