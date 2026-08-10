@@ -10,6 +10,14 @@ pub mod config;
 
 use clap::Parser;
 
+/// The running backend's version: the release tag when built by CI
+/// (`WIAB_VERSION`), the crate version otherwise. Reported by `/health` and
+/// stamped on telemetry as `service.version`.
+pub const VERSION: &str = match option_env!("WIAB_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Backend configuration. Each value defaults to a baked-in dev value, can be overridden by
 /// an environment variable, and can be overridden again by a command-line flag (which wins).
 #[derive(Parser, Debug)]

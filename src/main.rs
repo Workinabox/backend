@@ -39,13 +39,18 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .ok();
 
+    // Telemetry first, then configuration: a config error must land in the
+    // log stream, not vanish before the subscriber exists.
+    let telemetry =
+        wiab_telemetry::init(&wiab_telemetry::TelemetryConfig::from_env(), wiab::VERSION)?;
+
     // Parse via ArgMatches so we can report where each value came from, then resolve the full
     // configuration once (env is read only inside `AppConfig::load`).
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
-    let config = AppConfig::load(&cli)?;
+    let config = AppConfig::load(&cli)
+        .inspect_err(|error| tracing::error!(error = %error, "configuration failed"))?;
 
-    init_tracing(&config.serve.rust_log);
     info!(
         "config: persistence = {} ({})",
         config.serve.persistence,
@@ -99,12 +104,35 @@ async fn main() -> anyhow::Result<()> {
     // `X-Forwarded-For` (set by nginx) but must be able to fall back to the socket for a client
     // that reaches the backend directly, such as `git` over HTTPS. Without it there is no
     // address to key on and those requests fail.
-    axum_server::bind_rustls(addr, tls)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .context("backend server terminated unexpectedly")?;
+    let server = axum_server::bind_rustls(addr, tls)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>());
+    // Racing the server against the signals gives telemetry a flush on the
+    // way out; a plain await would die with batches still queued.
+    tokio::select! {
+        result = server => result.context("backend server terminated unexpectedly")?,
+        _ = shutdown_signal() => info!("shutdown signal received"),
+    }
+    telemetry.shutdown();
 
     Ok(())
+}
+
+/// Resolves on SIGINT (ctrl-c) or SIGTERM (systemd stop).
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler installation cannot fail on linux");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ctrl_c.await;
+    }
 }
 
 /// Loads the TLS cert/key from `WIAB_TLS_CERT`/`WIAB_TLS_KEY` (PEM), or generates a
@@ -169,12 +197,6 @@ fn self_signed_names(base_url: &str) -> Vec<String> {
         names.push(host.to_owned());
     }
     names
-}
-
-fn init_tracing(filter: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(filter.to_owned())
-        .init();
 }
 
 #[cfg(test)]

@@ -43,8 +43,6 @@ pub struct ServeConfig {
     pub tls_key: Option<String>,
     /// Directory hosting git repos (`WIAB_GIT_ROOT`, else a temp dir).
     pub git_root: PathBuf,
-    /// Tracing filter (`RUST_LOG`).
-    pub rust_log: String,
 }
 
 /// VM runtime selection and per-backend config. Firecracker is used only when enabled AND
@@ -116,7 +114,6 @@ impl AppConfig {
                 git_root: std::env::var("WIAB_GIT_ROOT")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| std::env::temp_dir().join("wiab-git")),
-                rust_log: env_or("RUST_LOG", "wiab=info,tower_http=info"),
             },
             nats: if env_flag("WIAB_NATS_ENABLED") {
                 Some(NatsConfig::from_env())
