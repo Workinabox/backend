@@ -27,7 +27,9 @@ const INGEST_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct LocalTranscriber {
-    tx: Sender<TranscriptJob>,
+    // The job plus the submitter's span and enqueue time: TranscriptJob lives
+    // in wiab-core, which stays tracing-free, so the context rides beside it.
+    tx: Sender<(TranscriptJob, tracing::Span, std::time::Instant)>,
 }
 
 /// Resolved whisper/STT config. Built once at startup (`WhisperConfig::from_env` — `Some` only
@@ -74,7 +76,7 @@ impl LocalTranscriber {
         let language = config.language.clone();
         let threads = config.threads;
 
-        let (tx, rx) = mpsc::channel::<TranscriptJob>();
+        let (tx, rx) = mpsc::channel::<(TranscriptJob, tracing::Span, std::time::Instant)>();
         let (startup_tx, startup_rx) = mpsc::channel();
         thread::Builder::new()
             .name("wiab-stt".to_owned())
@@ -99,7 +101,12 @@ impl LocalTranscriber {
     }
 
     fn submit(&self, job: TranscriptJob) {
-        if let Err(err) = self.tx.send(job) {
+        wiab_telemetry::metrics().stt_queue_depth.add(1, &[]);
+        if let Err(err) = self
+            .tx
+            .send((job, tracing::Span::current(), std::time::Instant::now()))
+        {
+            wiab_telemetry::metrics().stt_queue_depth.add(-1, &[]);
             warn!("failed to submit transcription job: {err}");
         }
     }
@@ -109,10 +116,11 @@ fn run_transcription_worker(
     model_path: String,
     language: Option<String>,
     threads: i32,
-    rx: Receiver<TranscriptJob>,
+    rx: Receiver<(TranscriptJob, tracing::Span, std::time::Instant)>,
     transcript_tx: UnboundedSender<FinalizedTranscript>,
     startup_tx: Sender<anyhow::Result<()>>,
 ) {
+    let load_started = std::time::Instant::now();
     let context_parameters = WhisperContextParameters::default();
     let context = match WhisperContext::new_with_params(&model_path, context_parameters) {
         Ok(context) => context,
@@ -125,6 +133,10 @@ fn run_transcription_worker(
         }
     };
     let _ = startup_tx.send(Ok(()));
+    info!(
+        duration_ms = load_started.elapsed().as_millis() as u64,
+        "whisper model loaded"
+    );
 
     info!(
         "transcription worker ready (language={}, threads={})",
@@ -132,7 +144,21 @@ fn run_transcription_worker(
         threads
     );
 
-    while let Ok(job) = rx.recv() {
+    while let Ok((job, parent, enqueued_at)) = rx.recv() {
+        wiab_telemetry::metrics().stt_queue_depth.add(-1, &[]);
+        let _ = enqueued_at; // queue depth carries the backlog story; no per-job wait metric
+        let span = tracing::info_span!(
+            parent: &parent,
+            "stt.transcribe",
+            wiab.meeting.id = %job.identity.meeting_id,
+            wiab.peer.id = %job.identity.peer_id,
+            wiab.track.id = %job.identity.track_id,
+            wiab.chunk.index = job.chunk_index,
+        );
+        let _guard = span.enter();
+        wiab_telemetry::metrics()
+            .stt_audio_duration
+            .add(job.pcm_16k_mono.len() as f64 / 16_000.0, &[]);
         let mut state = match context.create_state() {
             Ok(state) => state,
             Err(err) => {
@@ -155,6 +181,7 @@ fn run_transcription_worker(
             params.set_language(Some(language));
         }
 
+        let transcribe_started = std::time::Instant::now();
         if let Err(err) = state.full(params, &job.pcm_16k_mono) {
             warn!(
                 "transcription failed meeting='{}' peer='{}' track='{}' chunk={} err={err}",
@@ -165,6 +192,10 @@ fn run_transcription_worker(
             );
             continue;
         }
+
+        wiab_telemetry::metrics()
+            .stt_transcription_duration
+            .record(transcribe_started.elapsed().as_secs_f64(), &[]);
 
         let segment_count = state.full_n_segments();
 
@@ -205,13 +236,16 @@ fn run_transcription_worker(
             continue;
         }
 
+        // The spoken words themselves only at debug: transcripts are user
+        // content and must not sit in production logs by default.
+        tracing::debug!(text = %transcript, "transcript text");
         info!(
-            "transcript meeting='{}' peer='{}' track='{}' chunk={} text={}",
+            "transcript meeting='{}' peer='{}' track='{}' chunk={} chars={}",
             job.identity.meeting_id,
             job.identity.peer_id,
             job.identity.track_id,
             job.chunk_index,
-            transcript
+            transcript.len()
         );
 
         if let Err(err) = transcript_tx.send(FinalizedTranscript {
@@ -291,6 +325,7 @@ impl TrackAudioTranscriber {
             {
                 Ok(samples) => samples,
                 Err(err) => {
+                    wiab_telemetry::metrics().audio_decode_errors.add(1, &[]);
                     warn!(
                         "opus decode failed meeting='{}' peer='{}' track='{}': {err}",
                         self.identity.meeting_id, self.identity.peer_id, self.identity.track_id
