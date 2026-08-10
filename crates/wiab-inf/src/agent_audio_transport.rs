@@ -87,7 +87,18 @@ impl AgentAudioSource {
         clip: &SpeechClip,
         initial_attach_delay: Option<Duration>,
     ) -> Result<(), AgentAudioTransportError> {
-        let packets = self.packetize_clip(clip)?;
+        let encode_started = std::time::Instant::now();
+        let packets = match self.packetize_clip(clip) {
+            Ok(packets) => packets,
+            Err(error) => {
+                wiab_telemetry::metrics().audio_encode_errors.add(1, &[]);
+                return Err(error);
+            }
+        };
+        // Per clip, deliberately not per 20 ms frame.
+        wiab_telemetry::metrics()
+            .audio_encode_duration
+            .record(encode_started.elapsed().as_secs_f64(), &[]);
         if packets.is_empty() {
             return Ok(());
         }
