@@ -47,22 +47,46 @@ impl OrganizationRepository for OrganizationRepo {
         expected: Version,
     ) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(organization, expected).await,
-            Self::Postgres(repo) => repo.save(organization, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db(
+                    "organization",
+                    "save",
+                    "memory",
+                    repo.save(organization, expected),
+                )
+                .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db(
+                    "organization",
+                    "save",
+                    "postgres",
+                    repo.save(organization, expected),
+                )
+                .await
+            }
         }
     }
 
     async fn get(&self, id: &OrganizationId) -> Result<Option<(Organization, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("organization", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("organization", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Organization>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("organization", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("organization", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -76,22 +100,41 @@ pub enum ProjectRepo {
 impl ProjectRepository for ProjectRepo {
     async fn save(&self, project: Project, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(project, expected).await,
-            Self::Postgres(repo) => repo.save(project, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("project", "save", "memory", repo.save(project, expected))
+                    .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db(
+                    "project",
+                    "save",
+                    "postgres",
+                    repo.save(project, expected),
+                )
+                .await
+            }
         }
     }
 
     async fn get(&self, id: &ProjectId) -> Result<Option<(Project, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("project", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("project", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Project>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("project", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("project", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -105,22 +148,36 @@ pub enum AgentRepo {
 impl AgentRepository for AgentRepo {
     async fn save(&self, agent: Agent, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(agent, expected).await,
-            Self::Postgres(repo) => repo.save(agent, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("agent", "save", "memory", repo.save(agent, expected))
+                    .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("agent", "save", "postgres", repo.save(agent, expected))
+                    .await
+            }
         }
     }
 
     async fn get(&self, id: &AgentId) -> Result<Option<(Agent, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("agent", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("agent", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Agent>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("agent", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("agent", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -134,22 +191,36 @@ pub enum BoardRepo {
 impl BoardRepository for BoardRepo {
     async fn save(&self, board: Board, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(board, expected).await,
-            Self::Postgres(repo) => repo.save(board, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("board", "save", "memory", repo.save(board, expected))
+                    .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("board", "save", "postgres", repo.save(board, expected))
+                    .await
+            }
         }
     }
 
     async fn get(&self, id: &BoardId) -> Result<Option<(Board, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("board", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("board", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Board>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("board", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("board", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -225,22 +296,46 @@ pub enum PipelineRepo {
 impl PipelineRepository for PipelineRepo {
     async fn save(&self, pipeline: Pipeline, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(pipeline, expected).await,
-            Self::Postgres(repo) => repo.save(pipeline, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db(
+                    "pipeline",
+                    "save",
+                    "memory",
+                    repo.save(pipeline, expected),
+                )
+                .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db(
+                    "pipeline",
+                    "save",
+                    "postgres",
+                    repo.save(pipeline, expected),
+                )
+                .await
+            }
         }
     }
 
     async fn get(&self, id: &PipelineId) -> Result<Option<(Pipeline, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("pipeline", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("pipeline", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Pipeline>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("pipeline", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("pipeline", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -254,22 +349,35 @@ pub enum WorkRepo {
 impl WorkRepository for WorkRepo {
     async fn save(&self, work: Work, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(work, expected).await,
-            Self::Postgres(repo) => repo.save(work, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("work", "save", "memory", repo.save(work, expected)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("work", "save", "postgres", repo.save(work, expected))
+                    .await
+            }
         }
     }
 
     async fn get(&self, id: &WorkId) -> Result<Option<(Work, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("work", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("work", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Work>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("work", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("work", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -283,29 +391,58 @@ pub enum UserRepo {
 impl UserRepository for UserRepo {
     async fn save(&self, user: User, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(user, expected).await,
-            Self::Postgres(repo) => repo.save(user, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("user", "save", "memory", repo.save(user, expected)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("user", "save", "postgres", repo.save(user, expected))
+                    .await
+            }
         }
     }
 
     async fn get(&self, id: &UserId) -> Result<Option<(User, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("user", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("user", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<User>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("user", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("user", "list", "postgres", repo.list()).await
+            }
         }
     }
 
     async fn find_id_by_token_hash(&self, hash: &str) -> Result<Option<UserId>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.find_id_by_token_hash(hash).await,
-            Self::Postgres(repo) => repo.find_id_by_token_hash(hash).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db(
+                    "user",
+                    "find_id_by_token_hash",
+                    "memory",
+                    repo.find_id_by_token_hash(hash),
+                )
+                .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db(
+                    "user",
+                    "find_id_by_token_hash",
+                    "postgres",
+                    repo.find_id_by_token_hash(hash),
+                )
+                .await
+            }
         }
     }
 
@@ -314,8 +451,24 @@ impl UserRepository for UserRepo {
         fingerprint: &str,
     ) -> Result<Option<UserId>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.find_id_by_ssh_fingerprint(fingerprint).await,
-            Self::Postgres(repo) => repo.find_id_by_ssh_fingerprint(fingerprint).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db(
+                    "user",
+                    "find_id_by_ssh_fingerprint",
+                    "memory",
+                    repo.find_id_by_ssh_fingerprint(fingerprint),
+                )
+                .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db(
+                    "user",
+                    "find_id_by_ssh_fingerprint",
+                    "postgres",
+                    repo.find_id_by_ssh_fingerprint(fingerprint),
+                )
+                .await
+            }
         }
     }
 }
@@ -329,22 +482,34 @@ pub enum VmRepo {
 impl VmRepository for VmRepo {
     async fn save(&self, vm: Vm, expected: Version) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(vm, expected).await,
-            Self::Postgres(repo) => repo.save(vm, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("vm", "save", "memory", repo.save(vm, expected)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("vm", "save", "postgres", repo.save(vm, expected)).await
+            }
         }
     }
 
     async fn get(&self, id: &VmId) -> Result<Option<(Vm, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("vm", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("vm", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<Vm>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("vm", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("vm", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
@@ -362,8 +527,24 @@ impl RoleAssignmentRepository for RoleAssignmentRepo {
         expected: Version,
     ) -> Result<Version, SaveError> {
         match self {
-            Self::InMemory(repo) => repo.save(assignment, expected).await,
-            Self::Postgres(repo) => repo.save(assignment, expected).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db(
+                    "role_assignment",
+                    "save",
+                    "memory",
+                    repo.save(assignment, expected),
+                )
+                .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db(
+                    "role_assignment",
+                    "save",
+                    "postgres",
+                    repo.save(assignment, expected),
+                )
+                .await
+            }
         }
     }
 
@@ -372,22 +553,36 @@ impl RoleAssignmentRepository for RoleAssignmentRepo {
         id: &RoleAssignmentId,
     ) -> Result<Option<(RoleAssignment, Version)>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.get(id).await,
-            Self::Postgres(repo) => repo.get(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("role_assignment", "get", "memory", repo.get(id)).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("role_assignment", "get", "postgres", repo.get(id)).await
+            }
         }
     }
 
     async fn remove(&self, id: &RoleAssignmentId) -> Result<bool, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.remove(id).await,
-            Self::Postgres(repo) => repo.remove(id).await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("role_assignment", "remove", "memory", repo.remove(id))
+                    .await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("role_assignment", "remove", "postgres", repo.remove(id))
+                    .await
+            }
         }
     }
 
     async fn list(&self) -> Result<Vec<RoleAssignment>, RepoError> {
         match self {
-            Self::InMemory(repo) => repo.list().await,
-            Self::Postgres(repo) => repo.list().await,
+            Self::InMemory(repo) => {
+                wiab_telemetry::timed_db("role_assignment", "list", "memory", repo.list()).await
+            }
+            Self::Postgres(repo) => {
+                wiab_telemetry::timed_db("role_assignment", "list", "postgres", repo.list()).await
+            }
         }
     }
 }
