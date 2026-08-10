@@ -286,6 +286,10 @@ fn unauthorized() -> Response {
 
 /// 403 — authenticated, but the user/token lacks the required role.
 fn forbidden() -> Response {
+    tracing::info!(target: "audit", event = "authz.denied", outcome = "denied", gate = "git_http");
+    wiab_telemetry::metrics()
+        .authz_denials
+        .add(1, &[opentelemetry::KeyValue::new("gate", "git_http")]);
     (StatusCode::FORBIDDEN, "insufficient permissions").into_response()
 }
 

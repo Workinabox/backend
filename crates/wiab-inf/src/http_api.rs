@@ -1413,7 +1413,11 @@ async fn require_owner(
     let (user, _scope) = authenticate(state, headers).await?;
     let access = state.access_service.clone();
     let is_owner = access.is_owner(user).await.map_err(internal)?;
-    if is_owner { Ok(user) } else { Err(forbidden()) }
+    if is_owner {
+        Ok(user)
+    } else {
+        Err(forbidden("owner", &user))
+    }
 }
 
 /// Requires the caller hold a sufficient org-level role for the operation (e.g. creating
@@ -1433,7 +1437,11 @@ async fn require_org_role(
         .authorize_org(user, org, operation)
         .await
         .map_err(internal)?;
-    if allowed { Ok(user) } else { Err(forbidden()) }
+    if allowed {
+        Ok(user)
+    } else {
+        Err(forbidden("org_role", &user))
+    }
 }
 
 /// Requires the caller hold a sufficient role on the repo for the operation (token scope
@@ -1451,7 +1459,11 @@ async fn require_repo_role(
         .authorize(user, repo, operation, Some(&scope))
         .await
         .map_err(internal)?;
-    if allowed { Ok(()) } else { Err(forbidden()) }
+    if allowed {
+        Ok(())
+    } else {
+        Err(forbidden("repo_role", &user))
+    }
 }
 
 /// Requires the caller may read the repo's contents, applying the same rule the git transport
@@ -1620,7 +1632,25 @@ fn unauthorized() -> (StatusCode, String) {
     )
 }
 
-fn forbidden() -> (StatusCode, String) {
+/// One sample on the login counter; the audit event is emitted by the auth
+/// services themselves, next to the decision.
+fn record_login(outcome: &'static str, method: &'static str) {
+    wiab_telemetry::metrics().auth_logins.add(
+        1,
+        &[
+            opentelemetry::KeyValue::new("outcome", outcome),
+            opentelemetry::KeyValue::new("method", method),
+        ],
+    );
+}
+
+/// Builds the 403, and is therefore the single place every denial is audited
+/// and counted — the gates above never construct one themselves.
+fn forbidden(gate: &'static str, actor: &UserId) -> (StatusCode, String) {
+    tracing::info!(target: "audit", event = "authz.denied", outcome = "denied", gate, actor = %actor);
+    wiab_telemetry::metrics()
+        .authz_denials
+        .add(1, &[opentelemetry::KeyValue::new("gate", gate)]);
     (StatusCode::FORBIDDEN, "insufficient permissions".to_owned())
 }
 
@@ -1645,14 +1675,18 @@ async fn require_self_or_owner(
     state: &AppState,
     headers: &HeaderMap,
     target_user: &str,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<UserId, (StatusCode, String)> {
     let (user, _scope) = authenticate(state, headers).await?;
     if user.to_string() == target_user {
-        return Ok(());
+        return Ok(user);
     }
     let access = state.access_service.clone();
     let is_owner = access.is_owner(user).await.map_err(internal)?;
-    if is_owner { Ok(()) } else { Err(forbidden()) }
+    if is_owner {
+        Ok(user)
+    } else {
+        Err(forbidden("self_or_owner", &user))
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1718,9 +1752,13 @@ async fn login(
         .auth_service
         .login_with_password(&request.email, &request.password)
         .await
-        .map_err(|error| match error {
-            AuthError::InvalidCredentials => unauthorized(),
-            other => internal(other),
+        .inspect(|_| record_login("success", "password"))
+        .map_err(|error| {
+            record_login("failure", "password");
+            match error {
+                AuthError::InvalidCredentials => unauthorized(),
+                other => internal(other),
+            }
         })?;
     let user_id = state
         .user_service
@@ -1935,7 +1973,11 @@ async fn oidc_callback(
     let (principal, return_to) = federation
         .complete_login(&connection, &state_param, &code)
         .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+        .inspect(|_| record_login("success", "sso"))
+        .map_err(|error| {
+            record_login("failure", "sso");
+            (StatusCode::BAD_GATEWAY, error.to_string())
+        })?;
     // Sanitize again on the way out. The value was checked when the flow started and has since
     // round-tripped through the flow store; this is the hop that actually emits a `Location`,
     // so it is the one that must be safe.
@@ -1991,13 +2033,14 @@ async fn deactivate_user(
     Path(user_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
-    require_owner(&state, &headers).await?;
+    let actor = require_owner(&state, &headers).await?;
     let snapshot = state
         .user_service
         .deactivate_user(&user_id)
         .await
         .map_err(bad_request)?
         .ok_or_else(|| not_found("user", &user_id))?;
+    tracing::info!(target: "audit", event = "user.deactivated", outcome = "success", actor = %actor, user_id = %user_id);
     state
         .auth_service
         .revoke_all_sessions(&PrincipalId::new(user_id))
@@ -2012,13 +2055,14 @@ async fn activate_user(
     Path(user_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
-    require_owner(&state, &headers).await?;
+    let actor = require_owner(&state, &headers).await?;
     let snapshot = state
         .user_service
         .activate_user(&user_id)
         .await
         .map_err(bad_request)?
         .ok_or_else(|| not_found("user", &user_id))?;
+    tracing::info!(target: "audit", event = "user.activated", outcome = "success", actor = %actor, user_id = %user_id);
     Ok(Json(snapshot))
 }
 
@@ -2223,7 +2267,7 @@ async fn add_ssh_key(
     headers: HeaderMap,
     Json(request): Json<AddSshKeyRequest>,
 ) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
-    require_self_or_owner(&state, &headers, &user_id).await?;
+    let actor = require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
     match service
@@ -2231,7 +2275,10 @@ async fn add_ssh_key(
         .await
         .map_err(bad_request)?
     {
-        Some(snapshot) => Ok(Json(snapshot)),
+        Some(snapshot) => {
+            tracing::info!(target: "audit", event = "user.ssh_key.added", outcome = "success", actor = %actor, user_id = %user_id);
+            Ok(Json(snapshot))
+        }
         None => Err(not_found("user", &user_id)),
     }
 }
@@ -2241,7 +2288,7 @@ async fn remove_ssh_key(
     Path((user_id, key_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
-    require_self_or_owner(&state, &headers, &user_id).await?;
+    let actor = require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
     match service
@@ -2249,7 +2296,10 @@ async fn remove_ssh_key(
         .await
         .map_err(bad_request)?
     {
-        Some(snapshot) => Ok(Json(snapshot)),
+        Some(snapshot) => {
+            tracing::info!(target: "audit", event = "user.ssh_key.removed", outcome = "success", actor = %actor, user_id = %user_id, key_id = %key_id);
+            Ok(Json(snapshot))
+        }
         None => Err(not_found("user", &user_id)),
     }
 }
@@ -2260,7 +2310,7 @@ async fn issue_token(
     headers: HeaderMap,
     Json(request): Json<IssueTokenRequest>,
 ) -> Result<Json<IssuedTokenSnapshot>, (StatusCode, String)> {
-    require_self_or_owner(&state, &headers, &user_id).await?;
+    let actor = require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
     match service
@@ -2268,7 +2318,11 @@ async fn issue_token(
         .await
         .map_err(bad_request)?
     {
-        Some(issued) => Ok(Json(issued)),
+        Some(issued) => {
+            // The token id, never the token.
+            tracing::info!(target: "audit", event = "user.token.issued", outcome = "success", actor = %actor, user_id = %user_id, token_id = %issued.token.id);
+            Ok(Json(issued))
+        }
         None => Err(not_found("user", &user_id)),
     }
 }
@@ -2278,7 +2332,7 @@ async fn revoke_token(
     Path((user_id, token_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<UserSnapshot>, (StatusCode, String)> {
-    require_self_or_owner(&state, &headers, &user_id).await?;
+    let actor = require_self_or_owner(&state, &headers, &user_id).await?;
     let service = state.user_service.clone();
     let id = user_id.clone();
     match service
@@ -2286,7 +2340,10 @@ async fn revoke_token(
         .await
         .map_err(bad_request)?
     {
-        Some(snapshot) => Ok(Json(snapshot)),
+        Some(snapshot) => {
+            tracing::info!(target: "audit", event = "user.token.revoked", outcome = "success", actor = %actor, user_id = %user_id, token_id = %token_id);
+            Ok(Json(snapshot))
+        }
         None => Err(not_found("user", &user_id)),
     }
 }
@@ -2306,10 +2363,13 @@ async fn grant_role(
     headers: HeaderMap,
     Json(request): Json<GrantRoleRequest>,
 ) -> Result<Json<RoleAssignmentSnapshot>, (StatusCode, String)> {
-    require_owner(&state, &headers).await?;
+    let actor = require_owner(&state, &headers).await?;
     let service = state.access_service.clone();
     match service.grant(request).await.map_err(bad_request)? {
-        Some(snapshot) => Ok(Json(snapshot)),
+        Some(snapshot) => {
+            tracing::info!(target: "audit", event = "access.role.granted", outcome = "success", actor = %actor, user_id = %snapshot.user_id, role = %snapshot.role, assignment_id = %snapshot.id);
+            Ok(Json(snapshot))
+        }
         None => Err(not_found("user", "grantee")),
     }
 }
@@ -2319,11 +2379,12 @@ async fn revoke_role(
     Path(assignment_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_owner(&state, &headers).await?;
+    let actor = require_owner(&state, &headers).await?;
     let service = state.access_service.clone();
     let id = assignment_id.clone();
     let removed = service.revoke(&id).await.map_err(bad_request)?;
     if removed {
+        tracing::info!(target: "audit", event = "access.role.revoked", outcome = "success", actor = %actor, assignment_id = %assignment_id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(not_found("role assignment", &assignment_id))

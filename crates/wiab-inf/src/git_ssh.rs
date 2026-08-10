@@ -101,7 +101,11 @@ impl Handler for GitSshHandler {
                 self.user = Some(user);
                 Ok(Auth::Accept)
             }
-            Ok(None) | Err(_) => Ok(Auth::reject()),
+            Ok(None) | Err(_) => {
+                // The fingerprint, never the key material.
+                tracing::info!(target: "audit", event = "git.ssh.auth", outcome = "failure", fingerprint = %fingerprint);
+                Ok(Auth::reject())
+            }
         }
     }
 

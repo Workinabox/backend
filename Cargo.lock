@@ -383,6 +383,8 @@ dependencies = [
  "serde",
  "subtle",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

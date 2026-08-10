@@ -70,8 +70,11 @@ where
     /// response does not reveal account existence.
     pub async fn request(&self, email: &str) -> Result<(), AuthError> {
         let Some(principal) = self.directory.find_by_email(email).await? else {
+            // Server-side only — the HTTP response stays identical either way.
+            tracing::info!(target: "audit", event = "auth.password_reset.requested", outcome = "success", account_matched = false);
             return Ok(());
         };
+        tracing::info!(target: "audit", event = "auth.password_reset.requested", outcome = "success", actor = %principal, account_matched = true);
         let plaintext = self.secrets.generate();
         let token_hash = self.token_hasher.hash(&plaintext);
         let expires_at = self.clock.rfc3339_in(self.token_ttl_seconds);
@@ -108,11 +111,13 @@ where
         validate_password(new_password)?;
         let token_hash = self.token_hasher.hash(token);
         let Some(record) = self.verifications.consume(&token_hash).await? else {
+            tracing::info!(target: "audit", event = "auth.password_reset.confirmed", outcome = "failure", reason = "invalid_token");
             return Err(AuthError::InvalidCredentials);
         };
         if record.purpose() != VerificationPurpose::PasswordReset
             || record.is_expired(&self.clock.now_rfc3339())
         {
+            tracing::info!(target: "audit", event = "auth.password_reset.confirmed", outcome = "failure", reason = "invalid_token");
             return Err(AuthError::InvalidCredentials);
         }
         let principal = record.principal().clone();
@@ -125,6 +130,7 @@ where
             ))
             .await?;
         self.sessions.revoke_all_for_principal(&principal).await?;
+        tracing::info!(target: "audit", event = "auth.password_reset.confirmed", outcome = "success", actor = %principal);
         Ok(())
     }
 

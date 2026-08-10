@@ -9,3 +9,10 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 subtle = { workspace = true }
+# For the audit stream only: events with the literal `target: "audit"`. The
+# convention is documented in wiab-telemetry, but this crate deliberately
+# depends on plain `tracing` alone so the auth kit stays product-neutral.
+tracing = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

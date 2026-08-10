@@ -93,11 +93,13 @@ where
         // The state must match a stored, unconsumed, unexpired flow for this connection —
         // this single-use lookup is the CSRF/state check.
         let Some(flow) = self.flows.take(state).await? else {
+            tracing::info!(target: "audit", event = "auth.sso.login", outcome = "failure", connection, reason = "unknown_state");
             return Err(AuthError::FederationFailed(
                 "unknown or already-used login state".to_owned(),
             ));
         };
         if flow.connection() != connection || flow.is_expired(&self.clock.now_rfc3339()) {
+            tracing::info!(target: "audit", event = "auth.sso.login", outcome = "failure", connection, reason = "expired_state");
             return Err(AuthError::FederationFailed(
                 "invalid or expired login state".to_owned(),
             ));
@@ -115,8 +117,10 @@ where
         if let Some(identity) = self.federated.find(&claims.issuer, &claims.subject).await? {
             let principal = identity.principal().clone();
             if !self.directory.may_authenticate(&principal).await? {
+                tracing::info!(target: "audit", event = "auth.sso.login", outcome = "failure", actor = %principal, connection, reason = "not_permitted");
                 return Err(AuthError::InvalidCredentials);
             }
+            tracing::info!(target: "audit", event = "auth.sso.login", outcome = "success", actor = %principal, connection, jit_provisioned = false);
             return Ok((principal, flow.return_to().to_owned()));
         }
 
@@ -127,28 +131,31 @@ where
         // we require it; an enterprise IdP is authoritative for its own users and may omit
         // the claim (e.g. Microsoft Entra), so we trust the email it sends.
         let Some(email) = claims.email.clone() else {
+            tracing::info!(target: "audit", event = "auth.sso.login", outcome = "failure", connection, reason = "missing_email");
             return Err(AuthError::FederationFailed(
                 "the identity provider did not supply an email".to_owned(),
             ));
         };
         if connection_config.require_email_verified && !claims.email_verified {
+            tracing::info!(target: "audit", event = "auth.sso.login", outcome = "failure", connection, reason = "unverified_email");
             return Err(AuthError::FederationFailed(
                 "the identity provider did not supply a verified email".to_owned(),
             ));
         }
 
-        let principal = match self.directory.find_by_email(&email).await? {
+        let (principal, jit_provisioned) = match self.directory.find_by_email(&email).await? {
             Some(existing) => {
                 if connection_config.auto_link_verified_email {
-                    existing
+                    (existing, false)
                 } else {
                     // A local account exists but this connection won't silently adopt it.
+                    tracing::info!(target: "audit", event = "auth.sso.login", outcome = "failure", connection, reason = "account_exists");
                     return Err(AuthError::AccountExists);
                 }
             }
             None => {
                 let name = claims.name.clone().unwrap_or_else(|| email.clone());
-                self.directory.provision(&email, &name).await?
+                (self.directory.provision(&email, &name).await?, true)
             }
         };
 
@@ -160,6 +167,7 @@ where
             self.clock.now_rfc3339(),
         );
         self.federated.link(identity).await?;
+        tracing::info!(target: "audit", event = "auth.sso.login", outcome = "success", actor = %principal, connection, jit_provisioned);
         Ok((principal, flow.return_to().to_owned()))
     }
 }
