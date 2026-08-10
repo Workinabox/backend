@@ -31,7 +31,7 @@ pub async fn publish_pending<O: Outbox, M: Messaging>(
             Ok(()) => published.push(entry.id),
             Err(error) => {
                 // Stop here: the next pass retries this event before any that follow it.
-                tracing::warn!("outbox publish failed for {}: {error}", entry.event.name);
+                tracing::warn!(event_name = %entry.event.name, error = %error, "outbox publish failed");
                 break;
             }
         }
@@ -49,11 +49,11 @@ pub async fn publish_pending<O: Outbox, M: Messaging>(
 pub async fn run_publisher<O: Outbox, M: Messaging>(outbox: O, messaging: M, interval: Duration) {
     loop {
         match publish_pending(&outbox, &messaging).await {
-            Ok(count) if count > 0 => tracing::debug!("published {count} event(s)"),
+            Ok(count) if count > 0 => tracing::debug!(published = count, "outbox pass published"),
             Ok(_) => {}
             // A failing publisher must not take the backend down with it; the events stay
             // in the outbox and the next pass tries again.
-            Err(error) => tracing::warn!("outbox publisher pass failed: {error}"),
+            Err(error) => tracing::warn!(error = %error, "outbox publisher pass failed"),
         }
         tokio::time::sleep(interval).await;
     }

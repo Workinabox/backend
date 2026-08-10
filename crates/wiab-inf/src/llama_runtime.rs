@@ -235,9 +235,10 @@ impl LlamaWorker {
 
         let model_attr = KeyValue::new("gen_ai.request.model", self.model_label.clone());
         // Prefill done: the next sample produces the first output token.
-        wiab_telemetry::metrics()
-            .genai_time_to_first_token
-            .record(started.elapsed().as_secs_f64(), &[model_attr.clone()]);
+        wiab_telemetry::metrics().genai_time_to_first_token.record(
+            started.elapsed().as_secs_f64(),
+            std::slice::from_ref(&model_attr),
+        );
         let decode_started = Instant::now();
 
         let mut sampler = LlamaSampler::greedy();
@@ -281,7 +282,7 @@ impl LlamaWorker {
         if output_tokens > 0 {
             telemetry.genai_time_per_output_token.record(
                 decode_started.elapsed().as_secs_f64() / output_tokens as f64,
-                &[model_attr.clone()],
+                std::slice::from_ref(&model_attr),
             );
         }
         telemetry.genai_operation_duration.record(

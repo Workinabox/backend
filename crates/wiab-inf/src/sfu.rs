@@ -307,12 +307,18 @@ impl Sfu {
         })
     }
 
+    #[tracing::instrument(
+        name = "sfu.create_peer",
+        skip_all,
+        fields(wiab.meeting.id = %meeting_id, wiab.participant.id = %participant_id)
+    )]
     async fn create_peer(
         &self,
         meeting_id: String,
         participant_id: String,
         signal_tx: mpsc::UnboundedSender<ServerEnvelope>,
     ) -> anyhow::Result<(Arc<PeerState>, Vec<String>)> {
+        wiab_telemetry::metrics().sfu_peers.add(1, &[]);
         let peer_id = Uuid::new_v4().to_string();
         let peer = Arc::new(PeerState {
             id: peer_id.clone(),
@@ -746,6 +752,18 @@ impl Sfu {
             return;
         };
 
+        wiab_telemetry::metrics().sfu_peers.add(-1, &[]);
+        for producer in removed_peer.producers.read().await.values() {
+            wiab_telemetry::metrics()
+                .sfu_producers
+                .add(-1, &[media_kind_attribute(producer.kind())]);
+        }
+        for consumer in removed_peer.consumers.read().await.values() {
+            wiab_telemetry::metrics()
+                .sfu_consumers
+                .add(-1, &[media_kind_attribute(consumer.kind())]);
+        }
+
         let removed_producer_ids = removed_peer
             .producers
             .read()
@@ -1029,7 +1047,9 @@ fn server_signal_from_client_event(event: MeetingClientEvent) -> ServerSignal {
 
 /// `user` is the identity the upgrade request authenticated as; every seat this socket takes
 /// is resolved from it.
+#[tracing::instrument(name = "sfu.session", skip_all, fields(wiab.user.id = %user))]
 pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket) {
+    wiab_telemetry::metrics().sfu_signal_sessions.add(1, &[]);
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<ServerEnvelope>();
 
@@ -1202,6 +1222,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
                                 });
                             }
                             Err(err) => {
+                                transport_error("create");
                                 send_error(
                                     format!("failed to create transport: {err}"),
                                     &outbound_tx,
@@ -1232,6 +1253,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
                                 });
                             }
                             Err(err) => {
+                                transport_error("connect");
                                 send_error(
                                     format!("failed to connect transport: {err}"),
                                     &outbound_tx,
@@ -1254,6 +1276,9 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
                             .await
                         {
                             Ok((producer_id, peers_to_notify)) => {
+                                wiab_telemetry::metrics()
+                                    .sfu_producers
+                                    .add(1, &[media_kind_attribute(kind)]);
                                 let _ = outbound_tx.send(ServerEnvelope {
                                     request_id,
                                     signal: ServerSignal::Produced {
@@ -1271,6 +1296,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
                                 }
                             }
                             Err(err) => {
+                                transport_error("produce");
                                 send_error(format!("failed to produce: {err}"), &outbound_tx);
                             }
                         }
@@ -1301,6 +1327,9 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
                             .await
                         {
                             Ok(consumer) => {
+                                wiab_telemetry::metrics()
+                                    .sfu_consumers
+                                    .add(1, &[media_kind_attribute(consumer.kind())]);
                                 let _ = outbound_tx.send(ServerEnvelope {
                                     request_id,
                                     signal: ServerSignal::Consumed {
@@ -1312,6 +1341,7 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
                                 });
                             }
                             Err(err) => {
+                                transport_error("consume");
                                 send_error(format!("failed to consume: {err}"), &outbound_tx);
                             }
                         }
@@ -1358,6 +1388,21 @@ pub async fn handle_signal_socket(sfu: Arc<Sfu>, user: UserId, socket: WebSocket
     } else {
         warn!("signal socket closed before peer joined a meeting");
     }
+    wiab_telemetry::metrics().sfu_signal_sessions.add(-1, &[]);
+}
+
+fn media_kind_attribute(kind: MediaKind) -> opentelemetry::KeyValue {
+    let label = match kind {
+        MediaKind::Audio => "audio",
+        MediaKind::Video => "video",
+    };
+    opentelemetry::KeyValue::new("kind", label)
+}
+
+fn transport_error(operation: &'static str) {
+    wiab_telemetry::metrics()
+        .sfu_transport_errors
+        .add(1, &[opentelemetry::KeyValue::new("operation", operation)]);
 }
 
 fn opus_channel_count(rtp_parameters: &RtpParameters) -> Option<u16> {
