@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The store dispatch wraps every persistence call in wiab_telemetry::timed_db.
+wiab-telemetry = { workspace = true }
 authbox-app = { workspace = true }
 authbox-core = { workspace = true }
 anyhow = { workspace = true }

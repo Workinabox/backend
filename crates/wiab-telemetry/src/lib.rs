@@ -42,7 +42,7 @@ mod propagation;
 
 pub use config::TelemetryConfig;
 pub use init::{TelemetryGuard, init};
-pub use metrics::{Metrics, metrics};
+pub use metrics::{Metrics, metrics, timed_db};
 pub use propagation::{current_traceparent, extract_context};
 
 /// The tracing `target:` literal that routes an event to the audit stream.

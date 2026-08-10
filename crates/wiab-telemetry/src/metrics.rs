@@ -5,10 +5,13 @@
 //! Attribute sets are bounded enums by policy — user, VM, meeting, and repo
 //! ids belong on spans, never on metric labels.
 
+use std::future::Future;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
+use tracing::Instrument;
 
 /// Sub-second work: HTTP handling, database calls.
 const SHORT_BUCKETS: &[f64] = &[
@@ -55,6 +58,35 @@ pub struct Metrics {
 pub fn metrics() -> &'static Metrics {
     static METRICS: OnceLock<Metrics> = OnceLock::new();
     METRICS.get_or_init(Metrics::new)
+}
+
+/// Times one persistence call: a `db.client.operation.duration` sample plus a
+/// debug-level span, so per-call spans exist only when `RUST_LOG` asks for
+/// them. The dispatch enums wrap every delegation in this.
+pub async fn timed_db<T, E>(
+    repository: &'static str,
+    operation: &'static str,
+    backend: &'static str,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let span = tracing::debug_span!(
+        "db",
+        otel.name = %format_args!("db {operation}"),
+        db.system.name = backend,
+        db.operation.name = operation,
+        wiab.repository = repository,
+    );
+    let started = Instant::now();
+    let result = future.instrument(span).await;
+    metrics().db_operation_duration.record(
+        started.elapsed().as_secs_f64(),
+        &[
+            opentelemetry::KeyValue::new("db.system.name", backend),
+            opentelemetry::KeyValue::new("db.operation.name", operation),
+            opentelemetry::KeyValue::new("wiab.repository", repository),
+        ],
+    );
+    result
 }
 
 impl Metrics {
