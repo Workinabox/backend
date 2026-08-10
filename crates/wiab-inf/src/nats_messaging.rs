@@ -5,6 +5,7 @@
 //! backend restarted with it.
 
 use async_nats::Client;
+use tracing::Instrument;
 use wiab_app::{Messaging, MessagingError};
 
 /// Broker connection, read from env with a default matching the local compose service.
@@ -44,10 +45,38 @@ impl NatsMessaging {
 
 impl Messaging for NatsMessaging {
     async fn publish(&self, subject: &str, payload: Vec<u8>) -> Result<(), MessagingError> {
-        self.client
-            .publish(subject.to_owned(), payload.into())
-            .await
-            .map_err(|e| MessagingError::Backend(format!("publish to {subject}: {e}")))
+        let span = tracing::info_span!(
+            "publish",
+            otel.name = %format_args!("publish {subject}"),
+            otel.kind = "producer",
+            messaging.system = "nats",
+            messaging.destination.name = %subject,
+            messaging.operation.type = "send",
+        );
+        async {
+            // The subject set is the bounded domain-event vocabulary
+            // (team.started, task.completed, ...), safe as a metric label.
+            let mut headers = async_nats::HeaderMap::new();
+            if let Some(traceparent) = wiab_telemetry::current_traceparent() {
+                headers.insert("traceparent", traceparent.as_str());
+            }
+            let result = self
+                .client
+                .publish_with_headers(subject.to_owned(), headers, payload.into())
+                .await
+                .map_err(|e| MessagingError::Backend(format!("publish to {subject}: {e}")));
+            let mut attributes = vec![
+                opentelemetry::KeyValue::new("messaging.system", "nats"),
+                opentelemetry::KeyValue::new("messaging.destination.name", subject.to_owned()),
+            ];
+            if result.is_err() {
+                attributes.push(opentelemetry::KeyValue::new("error.type", "publish_failed"));
+            }
+            wiab_telemetry::metrics().messaging_sent.add(1, &attributes);
+            result
+        }
+        .instrument(span)
+        .await
     }
 }
 
