@@ -6448,6 +6448,7 @@ dependencies = [
  "governor",
  "llama-cpp-2",
  "mediasoup",
+ "opentelemetry",
  "opus",
  "rand 0.10.1",
  "refinery",
@@ -6461,10 +6462,12 @@ dependencies = [
  "tokio-postgres",
  "tower_governor",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
  "whisper-rs",
  "wiab-app",
  "wiab-core",
+ "wiab-telemetry",
 ]
 
 [[package]]

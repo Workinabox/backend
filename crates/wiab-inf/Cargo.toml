@@ -32,6 +32,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+wiab-telemetry = { workspace = true }
 uuid = { workspace = true }
 whisper-rs = { workspace = true }
 governor = { workspace = true }
