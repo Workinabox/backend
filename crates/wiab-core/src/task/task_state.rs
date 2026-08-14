@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::task::TaskError;
 
-/// Lifecycle of a task, as specified in `docs/AGENT_MODEL.md`:
+/// Lifecycle of a task:
 ///
 /// ```text
 /// Created → Assigned → InProgress → Completed
