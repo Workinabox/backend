@@ -122,10 +122,11 @@ where
 
         let connection_config = self.connection(connection)?;
 
-        // Provisioning or matching a user needs an email. Whether it must be marked
-        // verified is per-connection: a consumer IdP (Google) stamps `email_verified` and
-        // we require it; an enterprise IdP is authoritative for its own users and may omit
-        // the claim (e.g. Microsoft Entra), so we trust the email it sends.
+        // Provisioning or matching a user needs an email, and whether it must be marked
+        // verified is per-connection — though both connections currently require it, because
+        // both auto-link. An IdP that omits `email_verified` (e.g. Microsoft Entra, which
+        // also sends the address as `preferred_username` rather than `email`) is therefore
+        // rejected here rather than falling back to an unlinked account.
         let Some(email) = claims.email.clone() else {
             return Err(AuthError::FederationFailed(
                 "the identity provider did not supply an email".to_owned(),

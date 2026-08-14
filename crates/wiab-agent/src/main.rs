@@ -3,8 +3,8 @@
 //! the agent-drive config, announces itself, and runs a heartbeat loop — reporting to the
 //! backend over vsock when the broker is listening, and always logging to the console.
 //!
-//! This is the first real slice of the agent. The full reasoning loop (docs/AGENT_MODEL.md) is
-//! separate work; this establishes that a per-agent process runs inside its VM and reports back.
+//! This is the first real slice of the agent. The full reasoning loop is separate work; this
+//! establishes that a per-agent process runs inside its VM and reports back.
 
 use std::io::Write;
 use std::time::Duration;

@@ -2,8 +2,7 @@
 //!
 //! `http_api.rs`'s own unit tests cover the routing predicates (`csrf_exempt`,
 //! `is_public_route`) in isolation. These exercise `http_router` end to end, so a handler that
-//! forgets its guard fails here instead of shipping — the regression test for C1/C2 in
-//! `docs/SECURITY_REVIEW_OPUS48.md`.
+//! forgets its guard fails here instead of shipping.
 
 use std::net::SocketAddr;
 
