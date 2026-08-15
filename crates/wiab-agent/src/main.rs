@@ -19,17 +19,17 @@ const VSOCK_PORT: u32 = 5000;
 
 /// Resolve a config value from the environment, falling back to the agent-drive `agent.env`.
 fn config(key: &str) -> Option<String> {
-    if let Ok(value) = std::env::var(key) {
-        if !value.is_empty() {
-            return Some(value);
-        }
+    if let Ok(value) = std::env::var(key)
+        && !value.is_empty()
+    {
+        return Some(value);
     }
     let text = std::fs::read_to_string("/opt/agent/agent.env").ok()?;
     for line in text.lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == key {
-                return Some(v.trim().trim_matches('"').to_owned());
-            }
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim().trim_matches('"').to_owned());
         }
     }
     None

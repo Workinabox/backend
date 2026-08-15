@@ -32,6 +32,11 @@ const AUTH_BURST: u32 = 10;
 const GIT_REPLENISH_MILLIS: u64 = 100;
 const GIT_BURST: u32 = 60;
 
+/// A clone is many requests from one legitimate client; a login is not — so the credential
+/// endpoints must stay the stricter of the two.
+const _: () = assert!(GIT_REPLENISH_MILLIS < AUTH_REPLENISH_MILLIS);
+const _: () = assert!(GIT_BURST > AUTH_BURST);
+
 /// Rate-limit configuration, built once and shared by the layers that use it.
 pub struct RateLimits {
     pub auth: Arc<GovernorConfig<SmartIpKeyExtractor, governor::middleware::NoOpMiddleware>>,
@@ -75,12 +80,5 @@ mod tests {
         // builder is the only thing standing between a typo here and a panic at startup.
         let limits = RateLimits::new();
         assert!(!Arc::ptr_eq(&limits.auth, &limits.git));
-    }
-
-    #[test]
-    fn credential_endpoints_are_stricter_than_git() {
-        // A clone is many requests from one legitimate client; a login is not.
-        assert!(GIT_REPLENISH_MILLIS < AUTH_REPLENISH_MILLIS);
-        assert!(GIT_BURST > AUTH_BURST);
     }
 }

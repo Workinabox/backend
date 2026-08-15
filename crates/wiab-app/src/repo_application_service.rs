@@ -370,12 +370,15 @@ mod tests {
         }
     }
 
+    /// Path -> contents for one (repo, branch).
+    type FileTree = HashMap<String, Vec<u8>>;
+
     /// In-memory `GitBackend` used to assert routing without touching disk. Keyed by
     /// (repo, branch); commits are stored newest-last and returned newest-first.
     #[derive(Default)]
     struct TestGitBackend {
         inited: Mutex<Vec<RepoId>>,
-        files: Mutex<HashMap<(RepoId, String), HashMap<String, Vec<u8>>>>,
+        files: Mutex<HashMap<(RepoId, String), FileTree>>,
         commits: Mutex<HashMap<(RepoId, String), Vec<CommitSnapshot>>>,
         next_hash: AtomicU64,
     }
